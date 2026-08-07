@@ -9,6 +9,7 @@ publisher_cpp="$repo_root/src/publish/MoqxrPublisher.cpp"
 
 python3 - "$main_cpp" "$window_cpp" "$window_h" "$publisher_cpp" <<'PY'
 from pathlib import Path
+import re
 import sys
 
 main_cpp = Path(sys.argv[1]).read_text()
@@ -40,6 +41,10 @@ if "QObject::connect(&publisher, &moq2ts::MoqxrPublisher::framePublished" not in
 if "emit framePublished(QStringLiteral(\"catalog\")" not in publisher_cpp:
     raise SystemExit("real publisher must emit catalog stats")
 
-if "emit framePublished(next->trackName" not in publisher_cpp:
+# Match the emit by shape, not by the local variable's name. The publish loop
+# holds the object in "current" rather than "next" since the one-object look-ahead
+# was introduced; the guarded behaviour is that a per-object stats signal carries
+# the track name of the object being published.
+if not re.search(r"emit framePublished\(\w+(?:->|\.)trackName", publisher_cpp):
     raise SystemExit("real publisher must emit per-object publisher stats")
 PY

@@ -34,7 +34,10 @@ grep -q 'MOQ2TS_HAVE_LIBAV_CAPTURE' "$PKT" \
 # Pipeline marks file path VOD and capture path live.
 grep -q '.randomAccess = true,' "$PIPE" \
   || fail "file path must advertise randomAccess for VOD"
-grep -q '.trackDurationMs = M2tsPacketizer::probeDurationMs' "$PIPE" \
+# The file path sources trackDurationMs from the probe. The probe is skipped for
+# non-seekable live streams (which would consume the pipe a second time), so the
+# invocation may be guarded - assert the probe call is still wired.
+grep -q 'M2tsPacketizer::probeDurationMs(sourcePath)' "$PIPE" \
   || fail "file path must source trackDurationMs from the probe"
 grep -q '.isLive = false,' "$PIPE" \
   || fail "file path must set isLive=false"

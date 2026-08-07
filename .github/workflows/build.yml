@@ -39,7 +39,8 @@ jobs:
             libopenh264-dev \
             libavcodec-dev libavdevice-dev libavformat-dev libavutil-dev \
             libswresample-dev libswscale-dev \
-            libopus-dev
+            libopus-dev \
+            libsrt-openssl-dev
 
       - name: Fetch moqxr SDK
         env:
@@ -124,7 +125,7 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          brew install qt ffmpeg openh264 opus openssl@3 pkg-config cmake ninja
+          brew install qt ffmpeg openh264 opus openssl@3 srt pkg-config cmake ninja
 
       - name: Fetch moqxr SDK
         env:

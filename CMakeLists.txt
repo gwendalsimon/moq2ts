@@ -20,24 +20,30 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # ---------------- Qt discovery ----------------
+# QT_LIBS      -> Widgets(+Multimedia); linked only by the GUI executable.
+# CORE_QT_LIBS -> Core + Gui; linked by the reusable streaming core and the
+#                 headless CLI (no Widgets, no display server required).
 set(QT_LIBS)
+set(CORE_QT_LIBS)
 if(NOT QT_DEFAULT_MAJOR_VERSION)
     set(QT_OPTIONAL_COMPONENTS)
     if(WIN32)
         list(APPEND QT_OPTIONAL_COMPONENTS Multimedia)
     endif()
 
-    find_package(Qt6 QUIET COMPONENTS Widgets OPTIONAL_COMPONENTS ${QT_OPTIONAL_COMPONENTS})
+    find_package(Qt6 QUIET COMPONENTS Core Gui Widgets OPTIONAL_COMPONENTS ${QT_OPTIONAL_COMPONENTS})
     if(Qt6_FOUND)
         list(APPEND QT_LIBS Qt6::Widgets)
+        list(APPEND CORE_QT_LIBS Qt6::Core Qt6::Gui)
         if(TARGET Qt6::Multimedia)
             list(APPEND QT_LIBS Qt6::Multimedia)
             add_compile_definitions(MOQ2TS_HAVE_QT_MULTIMEDIA)
         endif()
     else()
-        find_package(Qt5 QUIET COMPONENTS Widgets OPTIONAL_COMPONENTS ${QT_OPTIONAL_COMPONENTS})
+        find_package(Qt5 QUIET COMPONENTS Core Gui Widgets OPTIONAL_COMPONENTS ${QT_OPTIONAL_COMPONENTS})
         if(Qt5_FOUND)
             list(APPEND QT_LIBS Qt5::Widgets)
+            list(APPEND CORE_QT_LIBS Qt5::Core Qt5::Gui)
             if(TARGET Qt5::Multimedia)
                 list(APPEND QT_LIBS Qt5::Multimedia)
                 add_compile_definitions(MOQ2TS_HAVE_QT_MULTIMEDIA)
@@ -112,9 +118,9 @@ endif()
 # moqxr API discovery.
 #
 # Two ways to link the real (non-mock) publisher:
-#   - MOQXR_SDK_DIR: a prebuilt SDK extracted from an openmoq-publisher release
+# - MOQXR_SDK_DIR: a prebuilt SDK extracted from an openmoq-publisher release
 #     (include/ + lib/ of static libraries). Preferred for CI and releases.
-#   - MOQXR_SOURCE_DIR: a local moqxr source checkout, built via add_subdirectory.
+# - MOQXR_SOURCE_DIR: a local moqxr source checkout, built via add_subdirectory.
 set(MOQXR_SDK_DIR "" CACHE PATH "Path to a prebuilt openmoq publisher SDK (include/ + lib/). When set, link the prebuilt libraries instead of building moqxr from source.")
 set(MOQXR_USE_PREBUILT_SDK FALSE)
 if(MOQXR_SDK_DIR)
@@ -152,10 +158,11 @@ if(MOQXR_PUBLISH_FOUND AND NOT MOQ2TS_BUILD_WITH_MOCK_MOQXR)
     endif()
 endif()
 
-set(SOURCES
-    src/main.cpp
-    src/app/MainWindow.cpp
-    src/app/PreviewPanel.cpp
+# ---------------- Reusable streaming core (no Qt Widgets) ----------------
+# The media/publish pipeline is compiled once into an OBJECT library that both the
+# GUI executable and the headless CLI link. It uses Qt types but only Core + Gui at
+# runtime (QImage lives in QtGui), so it never pulls in Widgets or a display server.
+set(CORE_SOURCES
     src/media/LivePipeline.cpp
     src/media/LibavCaptureSource.cpp
     src/media/V4l2Capabilities.cpp
@@ -166,7 +173,7 @@ set(SOURCES
 )
 
 if(APPLE)
-    list(APPEND SOURCES
+    list(APPEND CORE_SOURCES
         src/media/MacCaptureEnumerator.mm
         src/media/MacAvCapture.mm
     )
@@ -178,9 +185,7 @@ if(APPLE)
     )
 endif()
 
-set(HEADERS
-    src/app/MainWindow.h
-    src/app/PreviewPanel.h
+set(CORE_HEADERS
     src/app/PublishConfig.h
     src/media/LivePipeline.h
     src/media/LibavCaptureSource.h
@@ -191,9 +196,137 @@ set(HEADERS
     src/publish/MoqxrPublisher.h
 )
 
+add_library(moq2ts-core OBJECT ${CORE_SOURCES} ${CORE_HEADERS})
+set_target_properties(moq2ts-core PROPERTIES
+    AUTOMOC TRUE
+    AUTOUIC TRUE
+    AUTORCC TRUE
+    AUTOGEN_BUILD_DIR ${CMAKE_BINARY_DIR}/generated-core
+    POSITION_INDEPENDENT_CODE ON
+)
+# PUBLIC so the include dirs / link libs propagate to every executable that links
+# the object library.
+target_include_directories(moq2ts-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(moq2ts-core PUBLIC ${CORE_QT_LIBS})
+
+if(APPLE)
+    target_link_libraries(moq2ts-core PUBLIC
+        "-framework AVFoundation"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework Foundation"
+    )
+endif()
+
+if(OPENH264_FOUND)
+    target_link_libraries(moq2ts-core PUBLIC openh264::openh264)
+endif()
+
+if(FFMPEG_FOUND)
+    target_include_directories(moq2ts-core PUBLIC ${LIBAVCODEC_INCLUDE_DIRS} ${LIBAVDEVICE_INCLUDE_DIRS} ${LIBAVFORMAT_INCLUDE_DIRS} ${LIBAVUTIL_INCLUDE_DIRS} ${LIBSWRESAMPLE_INCLUDE_DIRS} ${LIBSWSCALE_INCLUDE_DIRS})
+    target_link_libraries(moq2ts-core PUBLIC PkgConfig::LIBAVCODEC PkgConfig::LIBAVFORMAT PkgConfig::LIBAVUTIL)
+    if(LIBAVDEVICE_FOUND)
+        target_link_libraries(moq2ts-core PUBLIC PkgConfig::LIBAVDEVICE)
+    endif()
+    if(LIBSWRESAMPLE_FOUND)
+        target_link_libraries(moq2ts-core PUBLIC PkgConfig::LIBSWRESAMPLE)
+    endif()
+    if(LIBSWSCALE_FOUND)
+        target_link_libraries(moq2ts-core PUBLIC PkgConfig::LIBSWSCALE)
+    endif()
+endif()
+
+if(OPUS_FOUND)
+    target_link_libraries(moq2ts-core PUBLIC opus::opus)
+endif()
+
+# Opt out explicitly. Auto-detection alone cannot be tested on a host that has
+# libsrt installed, and the no-SRT build is exactly the configuration CI runs, so it
+# needs to be reachable on demand rather than only by accident of the environment.
+option(MOQ2TS_ENABLE_SRT "Build SRT ingest when libsrt is available" ON)
+
+# libsrt is resolved here rather than inside the moqxr-SDK branch, so the mock build
+# links it too. Both the library and the POSIX socket headers SrtSource.cpp needs are
+# optional, so the file itself is added conditionally below.
+pkg_check_modules(SRT IMPORTED_TARGET srt)
+# FFmpeg's libavformat is linked against libsrt-gnutls. If we additionally link
+# the default (OpenSSL) libsrt, BOTH copies are loaded into the process; they
+# export the same symbols and each runs its own exit-time destructors against
+# the other's uninitialised state, which segfaults during shutdown. When the
+# gnutls build is present, link that one so exactly one libsrt is loaded.
+find_library(SRT_GNUTLS_LIB
+    NAMES libsrt-gnutls.so.1.5 libsrt-gnutls.so srt-gnutls
+    PATHS /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE} /usr/lib /usr/local/lib
+    NO_DEFAULT_PATH)
+set(MOQ2TS_SRT_USABLE FALSE)
+if(SRT_FOUND AND SRT_GNUTLS_LIB)
+    message(STATUS "Linking libsrt-gnutls (${SRT_GNUTLS_LIB}) to match FFmpeg and avoid a duplicate libsrt")
+    target_include_directories(moq2ts-core PUBLIC ${SRT_INCLUDE_DIRS})
+    target_link_libraries(moq2ts-core PUBLIC ${SRT_GNUTLS_LIB})
+    set(MOQ2TS_SRT_USABLE TRUE)
+elseif(SRT_FOUND)
+    target_link_libraries(moq2ts-core PUBLIC PkgConfig::SRT)
+    set(MOQ2TS_SRT_USABLE TRUE)
+else()
+    find_library(SRT_LIB NAMES srt srt-gnutls srt-openssl)
+    if(SRT_LIB)
+        target_link_libraries(moq2ts-core PUBLIC ${SRT_LIB})
+        set(MOQ2TS_SRT_USABLE TRUE)
+    endif()
+endif()
+
+# SRT ingest is compiled only where it can be. SrtSource.cpp includes <srt/srt.h>
+# and the POSIX socket headers (netdb.h, poll.h, sys/socket.h, unistd.h), none of
+# which exist under MSVC, so listing it unconditionally broke the build on any host
+# without libsrt and on Windows outright. The rest of the CLI is portable, so the
+# file is added only when usable and MOQ2TS_HAS_SRT tells the CLI whether
+# --srt-config can be honoured.
+if(MOQ2TS_ENABLE_SRT AND MOQ2TS_SRT_USABLE AND NOT WIN32)
+    target_sources(moq2ts-core PRIVATE src/media/SrtSource.cpp src/media/SrtSource.h)
+    target_compile_definitions(moq2ts-core PUBLIC MOQ2TS_HAS_SRT)
+    message(STATUS "SRT ingest enabled")
+else()
+    message(STATUS "SRT ingest disabled (MOQ2TS_ENABLE_SRT=OFF, no libsrt, or unsupported platform); --srt-config will be rejected")
+endif()
+
+if(MOQXR_PUBLISH_FOUND)
+    target_include_directories(moq2ts-core PUBLIC ${MOQXR_PUBLISH_INCLUDE_DIR})
+endif()
+
+if(NOT MOQ2TS_BUILD_WITH_MOCK_MOQXR AND MOQXR_USE_PREBUILT_SDK)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # GNU ld/lld: --start-group lets the linker rescan archives and resolve the
+        # circular picohttp/picoquic dependencies regardless of archive order.
+        target_link_libraries(moq2ts-core PUBLIC
+            -Wl,--start-group ${MOQXR_SDK_LIBS} -Wl,--end-group)
+    else()
+        # ld64 (macOS) and MSVC resolve cross-archive symbols without grouping.
+        target_link_libraries(moq2ts-core PUBLIC ${MOQXR_SDK_LIBS})
+    endif()
+    target_link_libraries(moq2ts-core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    if(WIN32)
+        target_link_libraries(moq2ts-core PUBLIC ws2_32 iphlpapi bcrypt)
+    endif()
+elseif(NOT MOQ2TS_BUILD_WITH_MOCK_MOQXR AND TARGET openmoq_publisher_lib)
+    target_link_libraries(moq2ts-core PUBLIC openmoq_publisher_lib)
+elseif(NOT MOQ2TS_BUILD_WITH_MOCK_MOQXR)
+    message(FATAL_ERROR "MOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF requires either a prebuilt SDK (set MOQXR_SDK_DIR) or a local moqxr checkout exposing openmoq_publisher_lib (set MOQXR_SOURCE_DIR).")
+endif()
+
+# ---------------- GUI executable (Qt Widgets) ----------------
+set(GUI_SOURCES
+    src/main.cpp
+    src/app/MainWindow.cpp
+    src/app/PreviewPanel.cpp
+)
+set(GUI_HEADERS
+    src/app/MainWindow.h
+    src/app/PreviewPanel.h
+)
+
 add_executable(moq2ts-publisher
-    ${SOURCES}
-    ${HEADERS}
+    ${GUI_SOURCES}
+    ${GUI_HEADERS}
 )
 
 if(APPLE)
@@ -219,71 +352,26 @@ set_target_properties(moq2ts-publisher PROPERTIES
 
 target_include_directories(moq2ts-publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-target_link_libraries(moq2ts-publisher PRIVATE ${QT_LIBS})
-
-if(APPLE)
-    target_link_libraries(moq2ts-publisher PRIVATE
-        "-framework AVFoundation"
-        "-framework CoreMedia"
-        "-framework CoreVideo"
-        "-framework Foundation"
-    )
-endif()
-
-if(OPENH264_FOUND)
-    target_link_libraries(moq2ts-publisher PRIVATE openh264::openh264)
-endif()
-
-if(FFMPEG_FOUND)
-    target_include_directories(moq2ts-publisher PRIVATE ${LIBAVCODEC_INCLUDE_DIRS} ${LIBAVDEVICE_INCLUDE_DIRS} ${LIBAVFORMAT_INCLUDE_DIRS} ${LIBAVUTIL_INCLUDE_DIRS} ${LIBSWRESAMPLE_INCLUDE_DIRS} ${LIBSWSCALE_INCLUDE_DIRS})
-    target_link_libraries(moq2ts-publisher PRIVATE PkgConfig::LIBAVCODEC PkgConfig::LIBAVFORMAT PkgConfig::LIBAVUTIL)
-    if(LIBAVDEVICE_FOUND)
-        target_link_libraries(moq2ts-publisher PRIVATE PkgConfig::LIBAVDEVICE)
-    endif()
-    if(LIBSWRESAMPLE_FOUND)
-        target_link_libraries(moq2ts-publisher PRIVATE PkgConfig::LIBSWRESAMPLE)
-    endif()
-    if(LIBSWSCALE_FOUND)
-        target_link_libraries(moq2ts-publisher PRIVATE PkgConfig::LIBSWSCALE)
-    endif()
-endif()
-
-if(OPUS_FOUND)
-    target_link_libraries(moq2ts-publisher PRIVATE opus::opus)
-endif()
-
-if(MOQXR_PUBLISH_FOUND)
-    target_include_directories(moq2ts-publisher PRIVATE ${MOQXR_PUBLISH_INCLUDE_DIR})
-endif()
-
-if(NOT MOQ2TS_BUILD_WITH_MOCK_MOQXR AND MOQXR_USE_PREBUILT_SDK)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        # GNU ld/lld: --start-group lets the linker rescan archives and resolve the
-        # circular picohttp/picoquic dependencies regardless of archive order.
-        target_link_libraries(moq2ts-publisher PRIVATE
-            -Wl,--start-group ${MOQXR_SDK_LIBS} -Wl,--end-group)
-    else()
-        # ld64 (macOS) and MSVC resolve cross-archive symbols without grouping.
-        target_link_libraries(moq2ts-publisher PRIVATE ${MOQXR_SDK_LIBS})
-    endif()
-    target_link_libraries(moq2ts-publisher PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    if(WIN32)
-        target_link_libraries(moq2ts-publisher PRIVATE ws2_32 iphlpapi bcrypt)
-    endif()
-elseif(NOT MOQ2TS_BUILD_WITH_MOCK_MOQXR AND TARGET openmoq_publisher_lib)
-    target_link_libraries(moq2ts-publisher PRIVATE openmoq_publisher_lib)
-elseif(NOT MOQ2TS_BUILD_WITH_MOCK_MOQXR)
-    message(FATAL_ERROR "MOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF requires either a prebuilt SDK (set MOQXR_SDK_DIR) or a local moqxr checkout exposing openmoq_publisher_lib (set MOQXR_SOURCE_DIR).")
-endif()
+target_link_libraries(moq2ts-publisher PRIVATE moq2ts-core ${QT_LIBS})
 
 install(TARGETS moq2ts-publisher
     RUNTIME DESTINATION bin
     BUNDLE DESTINATION .
 )
 
-# ----------------
-# Optional CLI target intentionally omitted until a standalone CLI entrypoint file
-# is added (kept as a placeholder for future expansion).
+# ---------------- Headless CLI (no Widgets; Linux/server deployment) ----------------
+add_executable(moq2ts-cli src/cli/main_cli.cpp)
+set_target_properties(moq2ts-cli PROPERTIES
+    AUTOMOC TRUE
+    AUTOGEN_BUILD_DIR ${CMAKE_BINARY_DIR}/generated-cli
+)
+target_include_directories(moq2ts-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(moq2ts-cli PRIVATE moq2ts-core ${CORE_QT_LIBS})
+
+install(TARGETS moq2ts-cli
+    RUNTIME DESTINATION bin
+)
+
 
 # Pure V4L2 mode-selection logic test (Linux only; no Qt/libav deps).
 if(UNIX AND NOT APPLE)
@@ -304,4 +392,14 @@ if(UNIX AND NOT APPLE)
     )
     target_include_directories(moq2ts-pace-delay-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME moq2ts-pace-delay-tests COMMAND moq2ts-pace-delay-tests)
+endif()
+
+# Pure live-ingest ring-buffer logic test (no Qt/libav/SRT deps).
+if(UNIX AND NOT APPLE)
+    enable_testing()
+    add_executable(moq2ts-ts-ring-tests
+        tests/ts_ring_buffer_test.cpp
+    )
+    target_include_directories(moq2ts-ts-ring-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME moq2ts-ts-ring-tests COMMAND moq2ts-ts-ring-tests)
 endif()

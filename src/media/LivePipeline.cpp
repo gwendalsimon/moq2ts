@@ -152,7 +152,9 @@ void LivePipeline::runLoop() {
 
     if ((m_config.videoSource.isEmpty() && m_config.audioSource.isEmpty()) &&
         (!m_config.cameraDeviceId.isEmpty() || !m_config.microphoneDeviceId.isEmpty())) {
-        LibavCaptureSource capture(m_config);
+        // Heap-allocated and shared with the lambda; see PublishState in LivePipeline.h.
+        auto capturePtr = std::make_shared<LibavCaptureSource>(m_config);
+        LibavCaptureSource& capture = *capturePtr;
         capture.setPreviewCallbacks(
             [this](const QImage& image) {
                 emit previewVideoFrame(image);
@@ -187,25 +189,25 @@ void LivePipeline::runLoop() {
             .generatedAtMs = QDateTime::currentMSecsSinceEpoch(),
         });
 
-        int64_t objects = 0;
-        int64_t bytes = 0;
-        std::uint64_t timelineObjectId = 0;
-        std::int64_t pacingStartUs = -1;
-        std::optional<PublishedObject> pendingTimeline;
         const int timelineEveryObjects = std::max(1, 1000 / std::max(1, m_config.fragmentDurationMs));
-        auto nextObject = [this, &capture, packetsPerObject, trackName, timelineTrackName, timelineEveryObjects, &objects, &bytes, &timelineObjectId, &pacingStartUs, &pendingTimeline]() -> std::optional<PublishedObject> {
+
+        auto st = std::make_shared<PublishState>();
+        st->capture = capturePtr;   // keeps the source alive alongside the counters
+        auto* capturePtrRaw = capturePtr.get();
+
+        auto nextObject = [this, st, capturePtrRaw, packetsPerObject, trackName, timelineTrackName, timelineEveryObjects]() -> std::optional<PublishedObject> {
             if (!m_running.load(std::memory_order_acquire)) {
                 return std::nullopt;
             }
-            if (pendingTimeline.has_value()) {
-                auto timeline = std::move(pendingTimeline);
-                pendingTimeline.reset();
+            if (st->pendingTimeline.has_value()) {
+                auto timeline = std::move(st->pendingTimeline);
+                st->pendingTimeline.reset();
                 return timeline;
             }
 
             M2tsObject object;
             QString readError;
-            if (!capture.readObject(packetsPerObject, &object, m_running, &readError)) {
+            if (!(*capturePtrRaw).readObject(packetsPerObject, &object, m_running, &readError)) {
                 if (!readError.isEmpty()) {
                     emit error(readError);
                 }
@@ -219,9 +221,10 @@ void LivePipeline::runLoop() {
             published.payload = std::move(object.payload);
             published.groupId = object.groupId;
             published.objectId = object.objectId;
+            published.startsGroup = startsGroup;
             published.mediaTimeUs = object.mediaTimeUs;
             published.mediaDurationUs = static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
-            if (startsGroup || (objects % timelineEveryObjects) == 0) {
+            if (startsGroup || (st->objects % timelineEveryObjects) == 0) {
                 PublishedObject timeline;
                 timeline.trackName = timelineTrackName;
                 timeline.payload = timelinePayload(published.groupId,
@@ -229,25 +232,25 @@ void LivePipeline::runLoop() {
                                                    published.mediaTimeUs,
                                                    nowUnixUs());
                 timeline.groupId = published.groupId;
-                timeline.objectId = timelineObjectId++;
+                timeline.objectId = st->timelineObjectId++;
                 timeline.mediaTimeUs = published.mediaTimeUs;
                 timeline.mediaDurationUs = 0;
-                pendingTimeline = std::move(timeline);
+                st->pendingTimeline = std::move(timeline);
             }
-            ++objects;
-            bytes += published.payload.size();
-            emit stats(objects, bytes);
+            ++st->objects;
+            st->bytes += published.payload.size();
+            emit stats(st->objects, st->bytes, static_cast<int64_t>(published.groupId + 1));
             if (m_config.paceEgress) {
-                if (pacingStartUs < 0) {
+                if (st->pacingStartUs < 0) {
                     // Anchor the pace clock so the first object is due immediately
                     // (subtract its media time), avoiding a one-time startup wait
-                    // equal to the encode/mux buffering offset. Subsequent objects
+                    // equal to the encode/mux buffering offset. Subsequent st->objects
                     // pace relative to this anchor on the same steady clock.
-                    pacingStartUs = nowSteadyUs() - static_cast<std::int64_t>(published.mediaTimeUs);
+                    st->pacingStartUs = nowSteadyUs() - static_cast<std::int64_t>(published.mediaTimeUs);
                 }
                 while (m_running.load(std::memory_order_acquire)) {
                     const std::int64_t delay = paceDelayUs(static_cast<std::int64_t>(published.mediaTimeUs),
-                                                           nowSteadyUs() - pacingStartUs, kPaceSlackUs);
+                                                           nowSteadyUs() - st->pacingStartUs, kPaceSlackUs);
                     if (delay <= 0) {
                         break;
                     }
@@ -269,7 +272,16 @@ void LivePipeline::runLoop() {
     }
 
     const QString sourcePath = !m_config.videoSource.isEmpty() ? m_config.videoSource : m_config.audioSource;
-    M2tsPacketizer packetizer(sourcePath);
+    // Heap-allocated and shared with the nextObject lambda below, NOT a stack local.
+    // See the comment on PublishState in LivePipeline.h: the lambda outlives this
+    // frame whenever waitForStopped() has to detach the worker, so anything it
+    // touches has to outlive the frame too.
+    auto packetizerPtr = std::make_shared<M2tsPacketizer>(sourcePath);
+    M2tsPacketizer& packetizer = *packetizerPtr;
+    // MSFTS carriage-profile knobs (msfts#7); must be set before open().
+    packetizer.setTransparent(m_config.transparentMode);
+    packetizer.setRetainSiTables(m_config.retainSiTables);
+    packetizer.setRetainNullPackets(m_config.retainNullPackets);
     QString packetizerError;
     if (!packetizer.open(m_config.programNumber, &packetizerError)) {
         emit error(packetizerError);
@@ -281,44 +293,74 @@ void LivePipeline::runLoop() {
     // Track name defaults to "program-1" when not supplied by other means.
     const QString trackName = QStringLiteral("program-1");
     const QString timelineTrackName = trackName + QStringLiteral(".timeline");
-    const QByteArray catalog = MsftsMuxer::catalogJson({
+    // A non-seekable source (FIFO / stdin / pipe) is a live feed: advertise it as
+    // live and skip VOD-only duration probing, which would open and consume the
+    // pipe a second time.
+    const bool liveStream = packetizer.sequential();
+    const qint64 fileDurationMs = liveStream ? 0 : M2tsPacketizer::probeDurationMs(sourcePath);
+    MsftsCatalog catalogSpec{
         .track = trackName,
         .packetSize = packetizer.packetSize(),
         .packetsPerObject = packetsPerObject,
         .programNumber = packetizer.programNumber(),
         .pmtPid = packetizer.pmtPid(),
         .pcrPid = packetizer.pcrPid(),
+        // Advertised as m2tsSiPids. Empty unless --retain-si kept the DVB SI PIDs
+        // alongside the selected program, which is exactly the case the field
+        // describes: tables retained in the filtered track beyond the PMT's list.
+        .siPids = packetizer.retainedSiPids(),
         // For 192-octet source packets the timestamp prefix is carried without
         // specified semantics ("opaque", MSFTS 6.9); omitted for 188.
         .timestampMode = packetizer.packetSize() == 192 ? QStringLiteral("opaque") : QString(),
         .initData = packetizer.initData(),
         .timelineTrack = timelineTrackName,
         .namespaceName = m_config.namespaceName,
-        .trackDurationMs = M2tsPacketizer::probeDurationMs(sourcePath),
+        .trackDurationMs = fileDurationMs,
         .randomAccess = true,
+        .m2tsMpts = m_config.transparentMode,
+        .m2tsMuxRateBps = m_config.m2tsMuxRateBps,
         .isLive = false,
         .bitrateBps = static_cast<qint64>(m_config.videoTargetBitrateKbps) * 1000,
         // generatedAt is suppressed for VOD by catalogJson (isLive false).
-    });
+    };
+    if (liveStream) {
+        // Live pipe feed: mark the track live (VOD duration does not apply).
+        catalogSpec.isLive = true;
+        // generatedAt is Optional in MSF 5.1.6 everywhere, so this is a choice rather
+        // than a requirement: it is genuinely useful on a live feed for telling one
+        // catalog instance from another, and every live example in both drafts carries
+        // it. 5.1.6 only says it SHOULD NOT appear when isLive is false, which is why
+        // it is set here rather than in the initializer above. The capture path
+        // already sets it; this is the path production uses.
+        catalogSpec.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
+    }
+    if (m_config.transparentMode) {
+        // Transparent mode now detects random_access_indicator in TS adaptation
+        // fields and starts new groups at those points (MSFTS Section 6.3). Groups begin
+        // at RAP when the source signals RAI; leave randomAccess true.
+    }
+    const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
 
-    int64_t objects = 0;
-    int64_t bytes = 0;
-    std::uint64_t timelineObjectId = 0;
-    std::optional<PublishedObject> pendingTimeline;
+    constexpr std::int64_t kPaceSlackUs = 10000; // 10 ms slack
     const int timelineEveryObjects = std::max(1, 1000 / std::max(1, m_config.fragmentDurationMs));
-    auto nextObject = [this, &packetizer, packetsPerObject, trackName, timelineTrackName, timelineEveryObjects, &objects, &bytes, &timelineObjectId, &pendingTimeline]() -> std::optional<PublishedObject> {
+
+    // Shared with the lambda by VALUE, so nothing it touches lives on this frame.
+    auto st = std::make_shared<PublishState>();
+    st->packetizer = packetizerPtr;
+
+    auto nextObject = [this, st, packetsPerObject, trackName, timelineTrackName, timelineEveryObjects]() -> std::optional<PublishedObject> {
         if (!m_running.load(std::memory_order_acquire)) {
             return std::nullopt;
         }
-        if (pendingTimeline.has_value()) {
-            auto timeline = std::move(pendingTimeline);
-            pendingTimeline.reset();
+        if (st->pendingTimeline.has_value()) {
+            auto timeline = std::move(st->pendingTimeline);
+            st->pendingTimeline.reset();
             return timeline;
         }
 
         M2tsObject object;
         QString readError;
-        if (!packetizer.readObject(packetsPerObject, &object, &readError)) {
+        if (!(*st->packetizer).readObject(packetsPerObject, &object, &readError)) {
             if (!readError.isEmpty()) {
                 emit error(readError);
             }
@@ -330,9 +372,10 @@ void LivePipeline::runLoop() {
         published.payload = std::move(object.payload);
         published.groupId = object.groupId;
         published.objectId = object.objectId;
-        published.mediaTimeUs = static_cast<std::uint64_t>(objects) * static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
+        published.startsGroup = object.startsGroup;
+        published.mediaTimeUs = static_cast<std::uint64_t>(st->objects) * static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
         published.mediaDurationUs = static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
-        if ((objects % timelineEveryObjects) == 0) {
+        if ((st->objects % timelineEveryObjects) == 0) {
             PublishedObject timeline;
             timeline.trackName = timelineTrackName;
             timeline.payload = timelinePayload(published.groupId,
@@ -340,14 +383,31 @@ void LivePipeline::runLoop() {
                                                published.mediaTimeUs,
                                                nowUnixUs());
             timeline.groupId = published.groupId;
-            timeline.objectId = timelineObjectId++;
+            timeline.objectId = st->timelineObjectId++;
             timeline.mediaTimeUs = published.mediaTimeUs;
             timeline.mediaDurationUs = 0;
-            pendingTimeline = std::move(timeline);
+            st->pendingTimeline = std::move(timeline);
         }
-        ++objects;
-        bytes += published.payload.size();
-        emit stats(objects, bytes);
+        ++st->objects;
+        st->bytes += published.payload.size();
+        emit stats(st->objects, st->bytes, static_cast<int64_t>(published.groupId + 1));
+
+        // Pace file-source publishing at media-time rate so data isn't dumped
+        // at wire speed before subscribers can connect.
+        if (m_config.pacedFileSource) {
+            if (st->pacingStartUs < 0) {
+                st->pacingStartUs = nowSteadyUs() - static_cast<std::int64_t>(published.mediaTimeUs);
+            }
+            while (m_running.load(std::memory_order_acquire)) {
+                const std::int64_t delay = paceDelayUs(static_cast<std::int64_t>(published.mediaTimeUs),
+                                                       nowSteadyUs() - st->pacingStartUs, kPaceSlackUs);
+                if (delay <= 0) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(std::min<std::int64_t>(delay, 5000)));
+            }
+        }
+
         return published;
     };
 

@@ -2,7 +2,25 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-moqxr_session="$repo_root/../moqxr/src/transport/moqt_session.cpp"
+
+# This guard asserts on the moqxr library, not on moq2ts, so it depends on a
+# checkout this repository does not control. Which tree sits at ../moqxr decides
+# whether it passes, and the assertions below describe a moqxr new enough to have
+# live_object_catalog_sent. Point MOQXR_SOURCE_DIR at the tree to check; skip
+# rather than fail when no suitable tree is present, so a missing or older
+# sibling checkout does not report as a broken guard.
+moqxr_dir="${MOQXR_SOURCE_DIR:-$repo_root/../moqxr}"
+moqxr_session="$moqxr_dir/src/transport/moqt_session.cpp"
+
+if [[ ! -f "$moqxr_session" ]]; then
+    printf 'catalog-before-media guards SKIPPED: no moqxr source at %s\n' "$moqxr_session"
+    exit 0
+fi
+if ! grep -q 'bool live_object_catalog_sent =' "$moqxr_session"; then
+    printf 'catalog-before-media guards SKIPPED: %s predates live-object catalog tracking\n' "$moqxr_dir"
+    printf '  (set MOQXR_SOURCE_DIR to a newer moqxr checkout to run these assertions)\n'
+    exit 0
+fi
 
 python3 - "$moqxr_session" <<'PY'
 from pathlib import Path
