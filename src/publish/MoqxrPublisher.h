@@ -29,6 +29,12 @@ struct PublishedObject {
     std::uint64_t objectId = 0;
     std::uint64_t mediaTimeUs = 0;
     std::uint64_t mediaDurationUs = 0;
+    // True when this object contains a random-access point and therefore opens a
+    // new group. Carried explicitly rather than derived from objectId == 0: the
+    // very first object of a stream has objectId 0 without any RAP
+    // (M2tsPacketizer.cpp:465 only bumps the group once sawFirstRap), so deriving
+    // it would mislabel exactly one object per run.
+    bool startsGroup = false;
 };
 
 class IMoqOutput {

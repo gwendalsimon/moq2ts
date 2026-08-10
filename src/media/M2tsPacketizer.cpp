@@ -123,6 +123,22 @@ M2tsPacketizer::M2tsPacketizer(QString sourcePath)
     : m_sourcePath(std::move(sourcePath)),
       m_file(m_sourcePath) {}
 
+void M2tsPacketizer::setTransparent(bool transparent) {
+    m_transparent = transparent;
+}
+
+QList<int> M2tsPacketizer::retainedSiPids() const {
+    return m_retainedSiPids;
+}
+
+void M2tsPacketizer::setRetainSiTables(bool retain) {
+    m_retainSiTables = retain;
+}
+
+void M2tsPacketizer::setRetainNullPackets(bool retain) {
+    m_retainNullPackets = retain;
+}
+
 bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     m_requestedProgramNumber = requestedProgramNumber;
     if (!m_file.open(QIODevice::ReadOnly)) {
@@ -131,13 +147,32 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
         }
         return false;
     }
+    // FIFOs, pipes and /dev/stdin are non-seekable; readObject drains a prebuffer
+    // instead of rewinding (see collectInitData).
+    m_sequential = m_file.isSequential();
     if (!detectPacketSize(error)) {
         return false;
     }
-    if (!collectInitData(error)) {
-        return false;
+    // Transparent mode carries the whole multiplex verbatim: no PID filtering,
+    // and initData stays empty (full PSI rides in-band). However, we still scan
+    // PAT/PMT to identify the PCR PID (video) for MSFTS Section 6.3 RAI-based group
+    // boundary detection.
+    if (!m_transparent) {
+        if (!collectInitData(error)) {
+            return false;
+        }
+    } else {
+        if (!identifyVideoPid(error)) {
+            // Non-fatal for transparent mode: if we can't find the video PID,
+            // fall back to latching on the first PID with RAI at runtime.
+            if (error) {
+                *error = QString(); // clear - not fatal
+            }
+        }
     }
-    return m_file.seek(0);
+    // Non-seekable sources cannot rewind; the prebuffer (or the peeked bytes) is
+    // replayed forward-only by readObject.
+    return m_sequential ? true : m_file.seek(0);
 }
 
 bool M2tsPacketizer::detectPacketSize(QString* error) {
@@ -185,7 +220,7 @@ QByteArray M2tsPacketizer::tsPacketView(const QByteArray& sourcePacket) const {
 
 bool M2tsPacketizer::collectInitData(QString* error) {
     const qint64 originalPos = m_file.pos();
-    if (!m_file.seek(0)) {
+    if (!m_sequential && !m_file.seek(0)) {
         if (error) {
             *error = QStringLiteral("Failed to seek M2TS source while collecting initData.");
         }
@@ -200,6 +235,11 @@ bool M2tsPacketizer::collectInitData(QString* error) {
         const QByteArray sourcePacket = m_file.read(m_packetSize);
         if (sourcePacket.size() != m_packetSize) {
             break;
+        }
+        // On non-seekable input we cannot rewind after the scan, so retain every
+        // packet consumed here for readObject to replay in order.
+        if (m_sequential) {
+            m_prebuffer += sourcePacket;
         }
         if (!packetHasSync(sourcePacket)) {
             if (error) {
@@ -266,7 +306,80 @@ bool M2tsPacketizer::collectInitData(QString* error) {
         return false;
     }
 
-    return m_file.seek(originalPos);
+    // Optional SI-table retention (msfts#7 suggestion 1). Added after the
+    // elementary-PID sanity check above so it cannot mask an unparsed PMT: keep
+    // the well-known DVB PSI/SI PIDs (NIT 0x10, SDT/BAT 0x11, EIT 0x12,
+    // TDT/TOT 0x14) alongside the selected program.
+    if (m_retainSiTables) {
+        m_retainedSiPids.clear();
+        for (int siPid : {0x0010, 0x0011, 0x0012, 0x0014}) {
+            m_selectedPids.insert(siPid);
+            m_retainedSiPids.append(siPid);
+        }
+    }
+
+    // Non-seekable sources keep their forward-only position; readObject drains the
+    // prebuffer captured above.
+    return m_sequential ? true : m_file.seek(originalPos);
+}
+
+bool M2tsPacketizer::identifyVideoPid(QString* error) {
+    // Lightweight PAT/PMT scan for transparent mode: identifies the PCR PID
+    // (typically the video PID) for RAI-based group boundary detection without
+    // building initData or setting up PID filtering.
+    const qint64 originalPos = m_file.pos();
+    if (!m_sequential && !m_file.seek(0)) {
+        return false;
+    }
+
+    constexpr int maxPacketsToScan = 4096;
+    int pmtPid = -1;
+    int programNumber = 0;
+    int pcrPid = -1;
+    std::set<int> elementaryPids;
+
+    for (int index = 0; index < maxPacketsToScan; ++index) {
+        const QByteArray sourcePacket = m_file.read(m_packetSize);
+        if (sourcePacket.size() != m_packetSize) {
+            break;
+        }
+        if (m_sequential) {
+            m_prebuffer += sourcePacket;
+        }
+        if (!packetHasSync(sourcePacket)) {
+            break;
+        }
+
+        const QByteArray tsPacket = tsPacketView(sourcePacket);
+        const int pid = pidOf(tsPacket);
+        if (pid == 0 && pmtPid < 0) {
+            QByteArray patSection;
+            if (extractPsiSection(tsPacket, &patSection)) {
+                findPatProgram(patSection, m_requestedProgramNumber, &programNumber, &pmtPid);
+            }
+        } else if (pmtPid >= 0 && pid == pmtPid && pcrPid < 0) {
+            QByteArray pmtSection;
+            if (extractPsiSection(tsPacket, &pmtSection) && !pmtSection.isEmpty()) {
+                parsePmt(pmtSection, &pcrPid, &elementaryPids);
+            }
+        }
+
+        if (pmtPid >= 0 && pcrPid >= 0) {
+            break;
+        }
+    }
+
+    if (pcrPid >= 0) {
+        m_pcrPid = pcrPid;
+        m_rapPid = pcrPid; // Use PCR PID (video) for RAI group detection
+        m_pmtPid = pmtPid;
+        m_programNumber = programNumber;
+    }
+
+    if (!m_sequential) {
+        m_file.seek(originalPos);
+    }
+    return pcrPid >= 0;
 }
 
 bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QString* error) {
@@ -282,7 +395,15 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     payload.reserve(packets * m_packetSize);
 
     for (int index = 0; index < packets; ++index) {
-        const QByteArray packet = m_file.read(m_packetSize);
+        // Drain any packets buffered during the init scan (non-seekable sources)
+        // before reading further from the device, preserving stream order.
+        QByteArray packet;
+        if (m_prebufferPos < m_prebuffer.size()) {
+            packet = m_prebuffer.mid(m_prebufferPos, m_packetSize);
+            m_prebufferPos += m_packetSize;
+        } else {
+            packet = m_file.read(m_packetSize);
+        }
         if (packet.isEmpty()) {
             break;
         }
@@ -298,10 +419,15 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             }
             return false;
         }
-        const int pid = pidOf(tsPacketView(packet));
-        if (m_selectedPids.find(pid) == m_selectedPids.end()) {
-            --index;
-            continue;
+        // Transparent mode emits every synced packet verbatim (no PID filtering).
+        if (!m_transparent) {
+            const int pid = pidOf(tsPacketView(packet));
+            const bool selected = m_selectedPids.find(pid) != m_selectedPids.end();
+            const bool keepNull = m_retainNullPackets && pid == 0x1FFF;
+            if (!selected && !keepNull) {
+                --index;
+                continue;
+            }
         }
         payload += packet;
     }
@@ -310,10 +436,72 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         return false;
     }
 
+    // MSFTS Section 6.3 Group Numbering: start a new group at random access points
+    // (IDR boundaries). Scan packets in this object for the random_access_indicator
+    // in the adaptation field. The video (PCR) PID is identified from PAT/PMT at
+    // open() time; if that scan failed (e.g. sequential source), fall back to
+    // latching onto the first PID where RAI is observed at runtime.
+    bool rapDetected = false;
+    const int ps = m_packetSize;
+    for (int offset = 0; offset < payload.size(); offset += ps) {
+        const QByteArray sourcePacket = payload.mid(offset, ps);
+        const QByteArray tsView = tsPacketView(sourcePacket);
+        const int pid = pidOf(tsView);
+        // Skip PSI (PAT=0x0000, CAT=0x0001) and null (0x1FFF)
+        if (pid <= 0x001F || pid == 0x1FFF) {
+            continue;
+        }
+        if (!hasRandomAccessIndicator(tsView)) {
+            continue;
+        }
+        // Use the known RAP PID if already identified from PAT/PMT or prior latch.
+        // In filtered mode without a known PCR PID, skip non-PCR PIDs.
+        if (!m_transparent && m_pcrPid >= 0 && pid != m_pcrPid) {
+            continue;
+        }
+        if (m_rapPid < 0) {
+            m_rapPid = pid; // fallback: latch on first RAI PID seen
+        }
+        if (pid == m_rapPid) {
+            rapDetected = true;
+            break;
+        }
+    }
+
+    if (rapDetected && m_sawFirstRap) {
+        // New group at this RAP boundary
+        ++m_currentGroupId;
+        m_nextObjectIdInGroup = 0;
+    }
+    if (rapDetected) {
+        m_sawFirstRap = true;
+    }
+
     object->payload = std::move(payload);
-    object->groupId = 0;
-    object->objectId = m_nextObjectId++;
+    object->groupId = m_currentGroupId;
+    object->objectId = m_nextObjectIdInGroup++;
+    object->startsGroup = rapDetected;
+    ++m_nextObjectId;
     return true;
+}
+
+bool M2tsPacketizer::hasRandomAccessIndicator(const QByteArray& tsPacket) const {
+    // TS packet adaptation field: byte 3 bits 5-4 = adaptation_field_control.
+    // Values 2 (AF only) or 3 (AF + payload) indicate an adaptation field is present.
+    // The adaptation field flags byte (byte 5) bit 6 = random_access_indicator.
+    if (tsPacket.size() < 6) {
+        return false;
+    }
+    const int adaptationControl = (static_cast<unsigned char>(tsPacket[3]) >> 4) & 0x03;
+    if (adaptationControl < 2) {
+        return false; // no adaptation field
+    }
+    const int afLength = static_cast<unsigned char>(tsPacket[4]);
+    if (afLength < 1) {
+        return false; // no flags byte
+    }
+    // Bit 6 of the flags byte is random_access_indicator
+    return (static_cast<unsigned char>(tsPacket[5]) & 0x40) != 0;
 }
 
 int M2tsPacketizer::packetSize() const {
@@ -338,6 +526,10 @@ QByteArray M2tsPacketizer::initData() const {
 
 std::uint64_t M2tsPacketizer::objectsRead() const {
     return m_nextObjectId;
+}
+
+bool M2tsPacketizer::sequential() const {
+    return m_sequential;
 }
 
 qint64 M2tsPacketizer::probeDurationMs(const QString& sourcePath) {

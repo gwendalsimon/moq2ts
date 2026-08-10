@@ -34,6 +34,15 @@ struct PublishConfig {
     int targetSegmentBytes = 64 * 1024;
     int programNumber = 0; // 0 selects the first nonzero PAT program
 
+    // MSFTS carriage-profile options (draft-gregoire-moq-msfts feedback, msfts#7).
+    // Defaults preserve the historical filtered single-program behavior.
+    bool transparentMode = false;   // carry the whole multiplex verbatim (no filter/rewrite)
+    bool retainSiTables = false;    // filtered path: also keep SDT/EIT/TDT-TOT/NIT PIDs
+    bool retainNullPackets = false; // filtered path: also keep null (0x1FFF) packets
+    int m2tsMuxRateBps = 0;         // advisory source mux rate; 0 omits the catalog hint
+    bool pacedFileSource = false;    // pace file-source publishing at media-time rate
+    int draftVersion = 16;              // MOQ draft version (14 or 16)
+
     bool forceRealtime = true;
     bool useOpenh264 = true;
     bool useLibAvTranscode = true;

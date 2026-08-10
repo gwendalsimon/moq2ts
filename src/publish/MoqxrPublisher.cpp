@@ -5,6 +5,7 @@
 #include <QThread>
 
 #include <chrono>
+#include <deque>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -148,13 +149,19 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
 
     try {
         openmoq::publisher::PublisherConfig publisherConfig;
-        publisherConfig.draft_version = defaultDraftVersion();
+        publisherConfig.draft_version = cfg.draftVersion == 14
+            ? openmoq::publisher::DraftVersion::kDraft14
+            : defaultDraftVersion();
         publisherConfig.track_namespace = cfg.namespaceName.toStdString();
-        publisherConfig.forward = true;
+        // Await-subscribe mode: only send data after the relay forwards a
+        // SUBSCRIBE from a downstream subscriber. The moqxr library no longer
+        // pre-announces tracks with PUBLISH messages, so the relay must forward
+        // actual SUBSCRIBE messages - matching the moqxr SRT ingest flow.
+        publisherConfig.forward = false;
         publisherConfig.publish_catalog = false;
         publisherConfig.paced = false;
         publisherConfig.loop = false;
-        publisherConfig.subscriber_timeout = std::chrono::seconds(30);
+        publisherConfig.subscriber_timeout = std::chrono::seconds(120);
 
         openmoq::publisher::LiveObjectSource source;
         source.tracks.push_back({.track_name = "catalog"});
@@ -166,11 +173,21 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         bool catalogSent = false;
         int64_t publisherObjects = 0;
         int64_t publisherBytes = 0;
+        // Look-ahead queue. final_in_subgroup must mark the last object of a group
+        // ON ITS OWN TRACK, and next_object() interleaves the media, catalog and
+        // timeline tracks, so the next object overall is often a different track.
+        // A single-slot look-ahead cannot answer that: we peek forward until an
+        // object on the same track appears, holding the skipped ones in order so
+        // the wire sequence is unchanged. In practice that is one or two objects,
+        // because the timeline is interleaved at most once per media object.
+        std::deque<PublishedObject> lookahead;
         source.next_object = [this,
                               catalogSent,
                               publisherObjects,
                               publisherBytes,
                               catalog,
+                              lookahead,
+                              mediaTrack = mediaTrackName,
                               nextObject = std::move(nextObject)]() mutable -> std::optional<openmoq::publisher::LiveObject> {
             if (!catalogSent) {
                 catalogSent = true;
@@ -190,23 +207,51 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 };
             }
 
-            std::optional<PublishedObject> next = nextObject();
-            if (!next.has_value()) {
-                return std::nullopt;
+            if (lookahead.empty()) {
+                std::optional<PublishedObject> first = nextObject();
+                if (!first.has_value()) {
+                    return std::nullopt;
+                }
+                lookahead.push_back(std::move(*first));
+            }
+
+            PublishedObject current = std::move(lookahead.front());
+            lookahead.pop_front();
+
+            // Find the next object on the SAME track, pulling more in as needed.
+            // With none (end of stream) current is the last on its track, so it
+            // closes its group.
+            bool isFinalInGroup = true;
+            std::size_t scan = 0;
+            for (;;) {
+                if (scan < lookahead.size()) {
+                    if (lookahead[scan].trackName == current.trackName) {
+                        isFinalInGroup = lookahead[scan].groupId != current.groupId;
+                        break;
+                    }
+                    ++scan;
+                    continue;
+                }
+                std::optional<PublishedObject> more = nextObject();
+                if (!more.has_value()) {
+                    break;
+                }
+                lookahead.push_back(std::move(*more));
             }
             ++publisherObjects;
-            publisherBytes += next->payload.size();
-            emit framePublished(next->trackName, publisherBytes, publisherObjects);
+            publisherBytes += current.payload.size();
+            emit framePublished(current.trackName, publisherBytes, publisherObjects);
+
             return openmoq::publisher::LiveObject{
-                .track_name = next->trackName.toStdString(),
-                .group_id = static_cast<std::size_t>(next->groupId),
-                .subgroup_id = next->subgroupId,
-                .object_id = static_cast<std::size_t>(next->objectId),
-                .media_time_us = next->mediaTimeUs,
-                .media_duration_us = next->mediaDurationUs,
-                .payload = toVector(next->payload),
-                .subgroup_contains_group_largest = true,
-                .final_in_subgroup = true,
+                .track_name = current.trackName.toStdString(),
+                .group_id = static_cast<std::size_t>(current.groupId),
+                .subgroup_id = current.subgroupId,
+                .object_id = static_cast<std::size_t>(current.objectId),
+                .media_time_us = current.mediaTimeUs,
+                .media_duration_us = current.mediaDurationUs,
+                .payload = toVector(current.payload),
+                .subgroup_contains_group_largest = isFinalInGroup,
+                .final_in_subgroup = isFinalInGroup,
             };
         };
 
