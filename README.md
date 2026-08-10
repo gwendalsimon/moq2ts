@@ -209,3 +209,8 @@ See [`docs/sequence-diagrams.md`](docs/sequence-diagrams.md).
 ## Developer docs
 
 See [`docs/DEVELOPER.md`](docs/DEVELOPER.md).
+
+## Attribution
+
+Originally created by [Paul Gregoire](https://github.com/mondain) as an example for the [msfts](https://datatracker.ietf.org/doc/draft-gregoire-moq-msfts/) draft.
+
