@@ -1,6 +1,6 @@
 # moq2ts — Cross-platform MOQ Live Publisher
 
-[![Build](https://github.com/mondain/moq2ts/actions/workflows/build.yml/badge.svg)](https://github.com/mondain/moq2ts/actions/workflows/build.yml)
+[![Build](https://github.com/openmoq/moq2ts/actions/workflows/build.yml/badge.svg)](https://github.com/openmoq/moq2ts/actions/workflows/build.yml)
 
 This repository contains a Qt-based application that publishes live media to MOQ
 using a moqxr-oriented publishing adapter.
@@ -31,7 +31,7 @@ Per-commit packages are attached to each run on the Actions tab. Tagged releases
 (`v*`) additionally publish these assets to a GitHub Release.
 
 These CI binaries are **real, relay-capable builds**: each links the prebuilt
-openmoq publisher SDK from the public `mondain/moqxr` releases (pinned via the
+openmoq publisher SDK from the public `openmoq/moqxr` releases (pinned via the
 `MOQXR_VERSION` workflow variable) together with the full capture and transcode
 stack (Qt6 + ffmpeg/libav + openh264 + opus), so they can publish to a real MOQ
 relay endpoint. The SDK ships static libraries (publisher + picoquic/picotls);
@@ -180,7 +180,7 @@ exists. Launch the packaged app with:
 `Publisher::publish_live_objects` API. There are two ways to link the real
 publisher (both require OpenSSL on the system).
 
-Link a prebuilt SDK from the `mondain/moqxr` releases (what CI uses) — extract the
+Link a prebuilt SDK from the `openmoq/moqxr` releases (what CI uses) — extract the
 archive for your platform and point `MOQXR_SDK_DIR` at it:
 
 ```bash

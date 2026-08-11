@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned openmoq publisher SDK release (mondain/moqxr, public). Bump to adopt a
+  # Pinned openmoq publisher SDK release (openmoq/moqxr, public). Bump to adopt a
   # newer SDK. Each platform archive ships include/ + lib/ of static libraries so
   # moq2ts links the real publisher (MOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF) and the
   # produced binaries can connect to a real relay. OpenSSL is a system dependency.
@@ -47,7 +47,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
-          gh release download "$MOQXR_VERSION" --repo mondain/moqxr \
+          gh release download "$MOQXR_VERSION" --repo openmoq/moqxr \
             --pattern '*Linux*' --dir "$RUNNER_TEMP"
           mkdir -p "$RUNNER_TEMP/moqxr-sdk"
           tar xzf "$RUNNER_TEMP"/openmoq-publisher-*-Linux.tar.gz \
@@ -132,7 +132,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
-          gh release download "$MOQXR_VERSION" --repo mondain/moqxr \
+          gh release download "$MOQXR_VERSION" --repo openmoq/moqxr \
             --pattern '*macOS*' --dir "$RUNNER_TEMP"
           mkdir -p "$RUNNER_TEMP/moqxr-sdk"
           tar xzf "$RUNNER_TEMP"/openmoq-publisher-*-macOS.tar.gz \
@@ -198,7 +198,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download $env:MOQXR_VERSION --repo mondain/moqxr `
+          gh release download $env:MOQXR_VERSION --repo openmoq/moqxr `
             --pattern '*Windows*' --dir $env:RUNNER_TEMP
           $zip = Get-ChildItem "$env:RUNNER_TEMP\openmoq-publisher-*-Windows.zip" | Select-Object -First 1
           Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP\moqxr-extract" -Force
