@@ -10,7 +10,6 @@
 #include <cstdio>
 #include <memory>
 #include <thread>
-#include <unistd.h>
 
 #include <QCommandLineOption>
 #include <QCommandLineParser>
@@ -26,6 +25,8 @@
 #include <QTimer>
 
 #ifdef MOQ2TS_HAS_SRT
+#include <unistd.h>
+
 #include "media/SrtSource.h"
 #endif
 
