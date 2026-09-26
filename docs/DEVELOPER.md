@@ -7,7 +7,7 @@ media publishing. It currently provides:
 
 1. Source selection (TS/M2TS video/audio)
 2. Direct TS/M2TS source packet validation and objectization
-3. Catalog generation for `draft-gregoire-moq-msfts-00`
+3. Catalog generation for `draft-gregoire-moq-msfts`
 4. Program-level packet filtering for selected MPEG-TS programs
 5. Camera and microphone enumeration through libavdevice/platform capture APIs
 6. In-process camera/microphone capture through libavdevice/libavformat

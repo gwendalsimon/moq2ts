@@ -5,7 +5,7 @@
 This repository contains a Qt-based application that publishes live media to MOQ
 using a moqxr-oriented publishing adapter.
 The media pipeline is designed around M2TS input and produces
-`draft-gregoire-moq-msfts-00` media objects: each object payload is a
+`draft-gregoire-moq-msfts` media objects: each object payload is a
 concatenation of whole 188-byte TS packets or 192-byte M2TS source packets.
 
 The application targets:
