@@ -166,9 +166,10 @@ ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" \
 For a file source in transparent mode the published payload must equal the input
 byte-for-byte. Under the mock build, the mock publisher logs objects to stderr;
 for a fidelity check, capture the emitted payloads and `cmp` against the source
-`.ts`. The catalog JSON (also logged) should contain `"m2tsMpts":true` and
-`"m2tsMuxRate":...`, and must NOT contain `m2tsProgramNumber`, `m2tsPmtPid`,
-`m2tsPcrPid`, or a root `initDataList`.
+`.ts`. The catalog JSON (also logged) should contain
+`"mpeg2tsMode":"unmodified-multiplex"`, and must NOT contain
+`mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`,
+`mpeg2tsSiPids`, or a root `initDataList`.
 
 In filtered mode the PAT/PMT bootstrap is carried the way MSF-01 defines it: the
 track gets an `initRef` string, and the bytes live in a root `initDataList` entry

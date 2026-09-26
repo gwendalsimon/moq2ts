@@ -139,12 +139,12 @@ exists. Launch the packaged app with:
   does not add a private wrapper before publication.
 - **Packet size**: source packets are validated as either 188-byte TS or 192-byte
   M2TS packets, with sync byte checks required by the draft.
-- **Catalog**: the media track uses `packaging: "m2ts"` with MSF common fields
-  (`isLive`, `role`, `mimeType`, `targetLatency`) and MSFTS m2ts fields
-  (`m2tsPacketSize`, `m2tsPacketsPerObject`, `m2tsProgramNumber`, optional
-  `m2tsPmtPid`/`m2tsPcrPid`, and `m2tsRandomAccess` when every group starts on a
-  random-access point). `m2tsTimestampMode` is emitted only for 192-octet
-  source packets.
+- **Catalog**: the media track uses `packaging: "mpeg2ts"` with MSF common
+  fields (`isLive`, `role`, `mimeType`, `targetLatency`) and MSFTS mpeg2ts
+  fields (`mpeg2tsMode`, `mpeg2tsPacketSize`, `mpeg2tsProgramNumber` and
+  optional `mpeg2tsPcrPid` on the `per-program` mode, and
+  `mpeg2tsRandomAccess` when every group starts on a random-access point).
+  `mpeg2tsTimestampMode` is emitted only for 192-octet source packets.
 - **Initialization data**: the packetizer scans the start of the source for
   PAT and PMT packets and emits them as Base64 `initData`, preserving 188-byte
   or 192-byte source-packet form.

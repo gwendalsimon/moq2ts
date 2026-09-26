@@ -285,7 +285,7 @@ Result: **the object that contains a keyframe always becomes object 0 of a new
 group.** Because grouping is object-granular (not packet-granular), object 0 holds
 the keyframe packet plus its neighbours; TS/PES are self-framing, so a subscriber
 that starts at object 0 always has a complete IDR to initialize its decoder. This
-is exactly what the catalog advertises as `m2tsRandomAccess = true`. (For the exact
+is exactly what the catalog advertises as `mpeg2tsRandomAccess = true`. (For the exact
 byte-vs-IDR interaction - objects are *not* cut short at the keyframe on this path -
 and a measured worked example, see [A8](#a8-objects-vs-groups--how-byte-sizing-and-idr-grouping-interact).)
 
@@ -306,14 +306,13 @@ Before media flows, the publisher emits an **MSF catalog** - a JSON document on 
 
 ```
 catalog (JSON)
-+-- format = "msf", version = 1
++-- version = "draft-01"
 +-- tracks[]
     +-- program-1              (the media track)
-    |   +-- packaging          = "m2ts"     -> payload is raw TS packets
-    |   +-- m2tsPacketSize     = 188 or 192 -> bytes per TS packet
-    |   +-- m2tsPacketsPerObject = 348      -> TS packets per object
-    |   +-- m2tsRandomAccess   = true       -> every group starts at a keyframe
-    |   +-- m2tsTransparent    = true       -> whole multiplex preserved verbatim
+    |   +-- packaging          = "mpeg2ts"  -> payload is raw TS packets
+    |   +-- mpeg2tsMode        = "unmodified-multiplex" or "per-program"
+    |   +-- mpeg2tsPacketSize  = 188 or 192 -> bytes per TS packet
+    |   +-- mpeg2tsRandomAccess = true      -> every group starts at a keyframe
     |   +-- role/mimeType/namespace/bitrate
     |   +-- targetLatency      = 1000       -> advisory latency target (ms)
     +-- program-1.timeline     (media-timeline side track)
