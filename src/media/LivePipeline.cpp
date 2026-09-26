@@ -178,7 +178,6 @@ void LivePipeline::runLoop() {
             .packetSize = capture.packetSize(),
             .packetsPerObject = packetsPerObject,
             .programNumber = capture.programNumber(),
-            .pmtPid = capture.pmtPid(),
             .pcrPid = capture.pcrPid(),
             .initData = capture.initData(),
             .timelineTrack = timelineTrackName,
@@ -303,22 +302,23 @@ void LivePipeline::runLoop() {
         .packetSize = packetizer.packetSize(),
         .packetsPerObject = packetsPerObject,
         .programNumber = packetizer.programNumber(),
-        .pmtPid = packetizer.pmtPid(),
         .pcrPid = packetizer.pcrPid(),
-        // Advertised as m2tsSiPids. Empty unless --retain-si kept the DVB SI PIDs
-        // alongside the selected program, which is exactly the case the field
-        // describes: tables retained in the filtered track beyond the PMT's list.
+        // Advertised as mpeg2tsSiPids. Empty unless --retain-si kept the DVB SI
+        // PIDs alongside the selected program, which is exactly the case the
+        // field describes: tables retained in the filtered track beyond the
+        // PMT's list.
         .siPids = packetizer.retainedSiPids(),
         // For 192-octet source packets the timestamp prefix is carried without
-        // specified semantics ("opaque", MSFTS 6.9); omitted for 188.
+        // specified semantics ("opaque", draft-gregoire-moq-msfts); omitted for
+        // 188.
         .timestampMode = packetizer.packetSize() == 192 ? QStringLiteral("opaque") : QString(),
         .initData = packetizer.initData(),
         .timelineTrack = timelineTrackName,
         .namespaceName = m_config.namespaceName,
         .trackDurationMs = fileDurationMs,
         .randomAccess = true,
-        .m2tsMpts = m_config.transparentMode,
-        .m2tsMuxRateBps = m_config.m2tsMuxRateBps,
+        .wholeMultiplex = m_config.transparentMode,
+        .mpeg2tsMuxRateBps = m_config.mpeg2tsMuxRateBps,
         .isLive = false,
         .bitrateBps = static_cast<qint64>(m_config.videoTargetBitrateKbps) * 1000,
         // generatedAt is suppressed for VOD by catalogJson (isLive false).

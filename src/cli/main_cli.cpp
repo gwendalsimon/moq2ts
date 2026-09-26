@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
     cfg.fragmentDurationMs = parser.value(QStringLiteral("fragment-ms")).toInt();
     cfg.targetSegmentBytes = parser.value(QStringLiteral("segment-bytes")).toInt();
     cfg.programNumber = parser.value(QStringLiteral("program")).toInt();
-    cfg.m2tsMuxRateBps = parser.value(QStringLiteral("mux-rate")).toInt();
+    cfg.mpeg2tsMuxRateBps = parser.value(QStringLiteral("mux-rate")).toInt();
     cfg.transparentMode = parser.isSet(QStringLiteral("transparent"));
     cfg.pacedFileSource = parser.isSet(QStringLiteral("paced"));
     cfg.draftVersion = parser.value(QStringLiteral("draft")).toInt();
