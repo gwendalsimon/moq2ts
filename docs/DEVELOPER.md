@@ -7,7 +7,7 @@ media publishing. It currently provides:
 
 1. Source selection (TS/M2TS video/audio)
 2. Direct TS/M2TS source packet validation and objectization
-3. Catalog generation for `draft-gregoire-moq-msfts-00`
+3. Catalog generation for `draft-gregoire-moq-msfts`
 4. Program-level packet filtering for selected MPEG-TS programs
 5. Camera and microphone enumeration through libavdevice/platform capture APIs
 6. In-process camera/microphone capture through libavdevice/libavformat
@@ -59,12 +59,13 @@ media publishing. It currently provides:
 - `M2tsPacketizer` scans PAT/PMT, selects one program, and filters media
   objects to PAT, selected PMT, selected PCR PID, and that program's elementary
   PIDs. Packets from other programs and null packets are not published.
-- `MsftsMuxer` builds the MSF catalog: an `m2ts` media track plus an optional
-  media-timeline side-track. The media track carries MSF common fields
-  (`isLive`, `role`, `mimeType`, `targetLatency` when live, optional `bitrate`)
-  and MSFTS m2ts fields (`m2tsPacketSize`, `m2tsPacketsPerObject`,
-  `m2tsProgramNumber`, optional `m2tsPmtPid`/`m2tsPcrPid`, and
-  `m2tsRandomAccess` when every group starts on a random-access point).
+- `MsftsMuxer` builds the MSF catalog: an `mpeg2ts` media track plus an
+  optional media-timeline side-track. The media track carries MSF common
+  fields (`isLive`, `role`, `mimeType`, `targetLatency` when live, optional
+  `bitrate`) and MSFTS mpeg2ts fields (`mpeg2tsMode`, `mpeg2tsPacketSize`,
+  `mpeg2tsProgramNumber` and optional `mpeg2tsPcrPid` on the `per-program`
+  mode, and `mpeg2tsRandomAccess` when every group starts on a random-access
+  point).
 - `MsftsMuxer` also adds a `<stream>.timeline` track of MSF
   `type: "mediatimeline"` that `depends` on the media track.
 - Whole source packets are grouped into MOQT Object payloads and exposed to
@@ -127,7 +128,7 @@ media publishing. It currently provides:
     single `{node, useMjpeg}` decision shared by capture and preview.
 
 - `src/media/MsftsMuxer.*`
-  - Generates a compact MSF catalog for the `m2ts` packaging value.
+  - Generates a compact MSF catalog for the `mpeg2ts` packaging value.
   - Adds an optional MSF `mediatimeline` side-track catalog entry.
 
 - `src/publish/MoqxrPublisher.*`
@@ -177,7 +178,7 @@ The app uses the local moqxr `Publisher::publish_live_objects` API. The adapter
 builds a `LiveObjectSource` with:
 
 - a `catalog` track carrying the MSF catalog JSON
-- one `m2ts` media track carrying source-packet object payloads
+- one `mpeg2ts` media track carrying source-packet object payloads
 - caller-supplied Group ID, Subgroup ID, Object ID, media time, and duration
 - payloads without CMSF/CMAF parsing
 
@@ -200,43 +201,47 @@ local mock sessions.
 ## Draft MSFTS conformance notes
 
 The media Object payload is only consecutive source packets. Do not prepend
-private headers. Object payload length must be a multiple of `m2tsPacketSize`.
+private headers. Object payload length must be a multiple of
+`mpeg2tsPacketSize`.
 
 `initData` is Base64 of whole source packets. For 188-byte TS this means PAT
 and PMT packets beginning with sync byte `0x47`; for 192-byte M2TS this means
 the four-byte timestamp prefix is retained and sync byte `0x47` remains at
 offset 4.
 
-For an MPTS input, `m2tsProgramNumber` identifies the selected program. The
+For an MPTS input, `mpeg2tsProgramNumber` identifies the selected program. The
 published media track is program-filtered; it is not a raw pass-through of every
 PID in the source multiplex.
 
 ## Catalog shape
 
-`MsftsMuxer::catalogJson` emits a compact MSF catalog
-(`draft-ietf-moq-msf-00` common fields plus `draft-gregoire-moq-msfts-00`
-m2ts fields). A live capture catalog looks like:
+`MsftsMuxer::catalogJson` emits a compact MSF catalog (`draft-ietf-moq-msf-01`
+common fields plus `draft-gregoire-moq-msfts` mpeg2ts fields). This encoder
+only produces the `unmodified-multiplex` and `per-program` values of the
+required `mpeg2tsMode` field. A live capture catalog (`per-program`) looks
+like:
 
 ```json
 {
-  "version": 1,
-  "format": "msf",
+  "version": "draft-01",
   "generatedAt": 1779416505123,
+  "initDataList": [
+    { "id": "init-program-1", "type": "inline", "data": "R0AAEAAAs...==" }
+  ],
   "tracks": [
     {
       "name": "program-1",
-      "packaging": "m2ts",
+      "packaging": "mpeg2ts",
       "isLive": true,
       "role": "video",
       "mimeType": "video/mp2t",
       "targetLatency": 1000,
-      "m2tsPacketSize": 188,
-      "m2tsPacketsPerObject": 7,
-      "m2tsProgramNumber": 1,
-      "m2tsPmtPid": 4096,
-      "m2tsPcrPid": 256,
-      "m2tsRandomAccess": true,
-      "initData": "R0AAEAAAs...=="
+      "mpeg2tsPacketSize": 188,
+      "mpeg2tsMode": "per-program",
+      "mpeg2tsProgramNumber": 1,
+      "mpeg2tsPcrPid": 256,
+      "mpeg2tsRandomAccess": true,
+      "initRef": "init-program-1"
     },
     {
       "name": "program-1.timeline",
@@ -248,19 +253,26 @@ m2ts fields). A live capture catalog looks like:
 }
 ```
 
+An `unmodified-multiplex` (`--transparent`) track omits
+`mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, and
+`mpeg2tsSiPids` — the draft requires them absent when the publisher selects
+no program.
+
 Field presence is conditional:
 
-- `format` and per-track `namespace` are emitted only when non-empty.
+- Per-track `namespace` is emitted only when non-empty.
 - `generatedAt` is included only for live streams (MSF 5.1.6).
 - `targetLatency` is present only when `isLive` is true (MSF 5.1.16); `trackDuration`
   is the inverse — VOD only, present only when `isLive` is false and the value is
   positive (MSF 5.1.37).
 - `bitrate` is emitted only when greater than zero.
-- `m2tsPmtPid`/`m2tsPcrPid` appear only when known (PID >= 0).
-- `m2tsTimestampMode` is valid only for 192-octet source packets (MSFTS 6.9) and
-  MUST NOT appear for 188.
-- `m2tsRandomAccess` is advertised only when every MOQT group begins at a
-  random-access point (MSFTS 6.8).
+- `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, and
+  `mpeg2tsSiPids` are emitted only in `per-program` mode; `mpeg2tsPcrPid` is
+  further gated on being known (PID >= 0).
+- `mpeg2tsTimestampMode` is valid only for 192-octet source packets and MUST
+  NOT appear for 188.
+- `mpeg2tsRandomAccess` is advertised only when every MOQT group begins at a
+  random-access point.
 
 ## Timeline track
 

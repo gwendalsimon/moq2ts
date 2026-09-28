@@ -5,7 +5,7 @@
 This repository contains a Qt-based application that publishes live media to MOQ
 using a moqxr-oriented publishing adapter.
 The media pipeline is designed around M2TS input and produces
-`draft-gregoire-moq-msfts-00` media objects: each object payload is a
+`draft-gregoire-moq-msfts` media objects: each object payload is a
 concatenation of whole 188-byte TS packets or 192-byte M2TS source packets.
 
 The application targets:
@@ -139,12 +139,12 @@ exists. Launch the packaged app with:
   does not add a private wrapper before publication.
 - **Packet size**: source packets are validated as either 188-byte TS or 192-byte
   M2TS packets, with sync byte checks required by the draft.
-- **Catalog**: the media track uses `packaging: "m2ts"` with MSF common fields
-  (`isLive`, `role`, `mimeType`, `targetLatency`) and MSFTS m2ts fields
-  (`m2tsPacketSize`, `m2tsPacketsPerObject`, `m2tsProgramNumber`, optional
-  `m2tsPmtPid`/`m2tsPcrPid`, and `m2tsRandomAccess` when every group starts on a
-  random-access point). `m2tsTimestampMode` is emitted only for 192-octet
-  source packets.
+- **Catalog**: the media track uses `packaging: "mpeg2ts"` with MSF common
+  fields (`isLive`, `role`, `mimeType`, `targetLatency`) and MSFTS mpeg2ts
+  fields (`mpeg2tsMode`, `mpeg2tsPacketSize`, `mpeg2tsProgramNumber` and
+  optional `mpeg2tsPcrPid` on the `per-program` mode, and
+  `mpeg2tsRandomAccess` when every group starts on a random-access point).
+  `mpeg2tsTimestampMode` is emitted only for 192-octet source packets.
 - **Initialization data**: the packetizer scans the start of the source for
   PAT and PMT packets and emits them as Base64 `initData`, preserving 188-byte
   or 192-byte source-packet form.

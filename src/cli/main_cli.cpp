@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
     addValue(QStringLiteral("segment-bytes"), QStringLiteral("Target object size (bytes)."), QStringLiteral("bytes"), QStringLiteral("65536"));
     addValue(QStringLiteral("program"), QStringLiteral("MPEG program number (0 = first)."), QStringLiteral("n"), QStringLiteral("0"));
     // MSFTS carriage-profile options (msfts#7).
-    addValue(QStringLiteral("mux-rate"), QStringLiteral("Advisory source mux rate (bits/s); 0 omits the catalog hint."),
+    addValue(QStringLiteral("mux-rate"), QStringLiteral("Advisory source mux rate (bits/s), per-program mode only; 0 omits the catalog hint."),
              QStringLiteral("bps"), QStringLiteral("0"));
     parser.addOption(QCommandLineOption(QStringLiteral("transparent"),
         QStringLiteral("Transparent/whole-multiplex passthrough (no PID filtering or rewrite).")));
@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
     cfg.fragmentDurationMs = parser.value(QStringLiteral("fragment-ms")).toInt();
     cfg.targetSegmentBytes = parser.value(QStringLiteral("segment-bytes")).toInt();
     cfg.programNumber = parser.value(QStringLiteral("program")).toInt();
-    cfg.m2tsMuxRateBps = parser.value(QStringLiteral("mux-rate")).toInt();
+    cfg.mpeg2tsMuxRateBps = parser.value(QStringLiteral("mux-rate")).toInt();
     cfg.transparentMode = parser.isSet(QStringLiteral("transparent"));
     cfg.pacedFileSource = parser.isSet(QStringLiteral("paced"));
     cfg.draftVersion = parser.value(QStringLiteral("draft")).toInt();
@@ -297,6 +297,14 @@ int main(int argc, char** argv) {
         cfg.transparentMode = true;
     }
 #endif  // MOQ2TS_HAS_SRT
+
+    // The draft forbids mpeg2tsMuxRate in unmodified-multiplex mode, so the
+    // catalog drops it; say so rather than accepting a value that does nothing.
+    if (cfg.transparentMode && cfg.mpeg2tsMuxRateBps > 0) {
+        logLine(stderr, "warn",
+                QStringLiteral("--mux-rate is only emitted in per-program mode; transparent "
+                               "(unmodified-multiplex) publishing ignores it."));
+    }
 
     // Validation mirrors the GUI guards.
     const bool hasSource = useSrt || !cfg.videoSource.isEmpty() || !cfg.audioSource.isEmpty() ||

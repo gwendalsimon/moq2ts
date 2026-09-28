@@ -23,7 +23,7 @@ sequenceDiagram
     App->>Pipe: start(config, publisher)
     Pipe->>Pkt: open(programNumber)
     Pkt-->>Pipe: packetSize = 188 or 192
-    Pipe->>Mux: catalogJson(MsftsCatalog{m2ts track + .timeline side-track})
+    Pipe->>Mux: catalogJson(MsftsCatalog{mpeg2ts track + .timeline side-track})
     Mux-->>Pipe: catalog JSON
     Pipe->>Pub: publishLiveObjects(cfg, track, [track.timeline], catalog, nextObject)
     Pub-->>Pipe: nextObject() pull

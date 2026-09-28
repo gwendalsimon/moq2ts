@@ -49,6 +49,23 @@ QString avError(int code) {
     return QString::fromUtf8(buffer);
 }
 
+// First sample format the encoder supports, or FLTP when it does not say.
+// AVCodec::sample_fmts was deprecated in libavcodec 61.13 (FFmpeg 7.1) and
+// removed in FFmpeg 8; avcodec_get_supported_config replaces it.
+AVSampleFormat preferredSampleFormat(const AVCodec* encoder) {
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 13, 100)
+    const void* formats = nullptr;
+    int count = 0;
+    if (avcodec_get_supported_config(nullptr, encoder, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
+                                     &formats, &count) >= 0 && formats && count > 0) {
+        return static_cast<const AVSampleFormat*>(formats)[0];
+    }
+    return AV_SAMPLE_FMT_FLTP;
+#else
+    return encoder->sample_fmts ? encoder->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+#endif
+}
+
 // libswscale logs "deprecated pixel format used, make sure you did set range
 // correctly" whenever a full-range yuvj* enum reaches it -- and it logs this at
 // context creation, before any sws_setColorspaceDetails call. Map yuvj* to its
@@ -612,7 +629,7 @@ struct LibavCaptureSource::Impl {
         stream->encoder->sample_rate = 48000;
         av_channel_layout_default(&stream->encoder->ch_layout, 2);
         stream->encoder->bit_rate = static_cast<int64_t>(config.audioTargetBitrateKbps) * 1000;
-        stream->encoder->sample_fmt = encoder->sample_fmts ? encoder->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+        stream->encoder->sample_fmt = preferredSampleFormat(encoder);
         stream->encoder->time_base = AVRational{1, stream->encoder->sample_rate};
 
         int rc = avcodec_open2(stream->encoder, encoder, nullptr);
@@ -1266,7 +1283,7 @@ struct LibavCaptureSource::Impl {
         stream->encoder->sample_rate = 48000;
         av_channel_layout_default(&stream->encoder->ch_layout, 2);
         stream->encoder->bit_rate = static_cast<int64_t>(config.audioTargetBitrateKbps) * 1000;
-        stream->encoder->sample_fmt = encoder->sample_fmts ? encoder->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+        stream->encoder->sample_fmt = preferredSampleFormat(encoder);
         stream->encoder->time_base = AVRational{1, stream->encoder->sample_rate};
         int rc = avcodec_open2(stream->encoder, encoder, nullptr);
         if (rc < 0) {

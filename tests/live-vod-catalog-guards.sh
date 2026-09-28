@@ -23,7 +23,7 @@ grep -q '!catalog.isLive' "$MUXER" \
 grep -q 'catalog.trackDurationMs > 0' "$MUXER" \
   || fail "trackDuration emission must check trackDurationMs > 0"
 grep -q 'catalog.randomAccess' "$MUXER" \
-  || fail "m2tsRandomAccess must be gated on catalog.randomAccess"
+  || fail "mpeg2tsRandomAccess must be gated on catalog.randomAccess"
 
 # Duration probe exists and is libav-guarded.
 grep -q 'probeDurationMs' "$PKT" \

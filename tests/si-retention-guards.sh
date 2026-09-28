@@ -17,8 +17,8 @@ grep -q 'bool retainSiTables = false;' "$CFG" \
   || fail "PublishConfig must carry retainSiTables defaulting to false"
 grep -q 'bool retainNullPackets = false;' "$CFG" \
   || fail "PublishConfig must carry retainNullPackets defaulting to false"
-grep -q 'int m2tsMuxRateBps = 0;' "$CFG" \
-  || fail "PublishConfig must carry m2tsMuxRateBps defaulting to 0"
+grep -q 'int mpeg2tsMuxRateBps = 0;' "$CFG" \
+  || fail "PublishConfig must carry mpeg2tsMuxRateBps defaulting to 0"
 
 # SI retention keeps the well-known DVB SI PIDs and is gated on the flag.
 grep -q 'm_retainSiTables' "$PKT" \
@@ -33,11 +33,11 @@ grep -q '0x1FFF' "$PKT" \
   || fail "null retention must target PID 0x1FFF"
 
 # Mux-rate hint is threshold-gated (never emitted when 0).
-grep -q 'catalog.m2tsMuxRateBps > 0' "$MUXER" \
-  || fail "m2tsMuxRate must be emitted only when > 0"
-grep -q 'm2tsMuxRate' "$MUXER" \
-  || fail "catalog must be able to emit m2tsMuxRate"
-grep -q 'qint64 m2tsMuxRateBps' "$HDR" \
-  || fail "MsftsCatalog must carry m2tsMuxRateBps"
+grep -q 'catalog.mpeg2tsMuxRateBps > 0' "$MUXER" \
+  || fail "mpeg2tsMuxRate must be emitted only when > 0"
+grep -q 'mpeg2tsMuxRate' "$MUXER" \
+  || fail "catalog must be able to emit mpeg2tsMuxRate"
+grep -q 'qint64 mpeg2tsMuxRateBps' "$HDR" \
+  || fail "MsftsCatalog must carry mpeg2tsMuxRateBps"
 
 printf 'si-retention guards passed\n'

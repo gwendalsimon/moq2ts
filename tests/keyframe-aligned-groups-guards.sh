@@ -31,9 +31,9 @@ grep -q 'randomAccessActive' "$CAPTURE" \
 grep -q 'randomAccessActive' "$HDR" \
   || fail "LibavCaptureSource must declare randomAccessActive()"
 
-# m2tsRandomAccess must only be emitted behind the randomAccess flag.
+# mpeg2tsRandomAccess must only be emitted behind the randomAccess flag.
 grep -q 'if (catalog.randomAccess)' "$MUXER" \
-  || fail "m2tsRandomAccess must be gated on catalog.randomAccess"
+  || fail "mpeg2tsRandomAccess must be gated on catalog.randomAccess"
 
 grep -q 'keyframeIntervalMs' "$REPO_ROOT/src/app/PublishConfig.h" \
   || fail "PublishConfig must expose keyframeIntervalMs"
