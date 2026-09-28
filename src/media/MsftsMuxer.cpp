@@ -181,6 +181,7 @@ bool MsftsMuxer::catalogFromJson(const QByteArray& json,
         return fail(QStringLiteral("Catalog has no tracks."));
     }
 
+    QString unsupportedMode;
     for (const QJsonValue value : tracks) {
         const QJsonObject track = value.toObject();
         // The draft names this value "mpeg2ts"; accept the legacy "m2ts"
@@ -199,9 +200,17 @@ bool MsftsMuxer::catalogFromJson(const QByteArray& json,
         // "per-program" for the modes this parser understands); accept the
         // legacy m2tsMpts/m2tsTransparent booleans as a fallback so catalogs
         // from older publishers still parse.
+        // The other draft modes (es-packets, es-units, media-frames) carry
+        // payloads that are not TS packets, so reading them as per-program
+        // would yield garbage; skip such tracks instead.
         const QString mode = track.value(QStringLiteral("mpeg2tsMode")).toString();
-        if (!mode.isEmpty()) {
-            parsed.wholeMultiplex = (mode == QStringLiteral("unmodified-multiplex"));
+        if (mode == QStringLiteral("unmodified-multiplex")) {
+            parsed.wholeMultiplex = true;
+        } else if (mode == QStringLiteral("per-program")) {
+            parsed.wholeMultiplex = false;
+        } else if (!mode.isEmpty()) {
+            unsupportedMode = mode;
+            continue;
         } else {
             parsed.wholeMultiplex = track.value(QStringLiteral("m2tsMpts"))
                                   .toBool(track.value(QStringLiteral("m2tsTransparent")).toBool(false));
@@ -254,6 +263,11 @@ bool MsftsMuxer::catalogFromJson(const QByteArray& json,
         return true;
     }
 
+    if (!unsupportedMode.isEmpty()) {
+        return fail(QStringLiteral("Unsupported mpeg2tsMode \"%1\" (expected "
+                                   "unmodified-multiplex or per-program).")
+                        .arg(unsupportedMode));
+    }
     return fail(QStringLiteral("Catalog has no mpeg2ts-packaged track."));
 }
 

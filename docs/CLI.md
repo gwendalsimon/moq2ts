@@ -61,7 +61,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--transparent` | off | Carry the **whole multiplex verbatim** (no PID filter/rewrite, no initialization data) |
 | `--retain-si` | off | Filtered mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT) |
 | `--retain-null` | off | Filtered mode: also keep null (0x1FFF) packets |
-| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s (0 omits the catalog hint) |
+| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s (0 omits the catalog hint). Per-program mode only: the draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--transparent` and SRT ingest ignore it with a warning |
 | `--fragment-ms <ms>` | `250` | Group cadence |
 | `--segment-bytes <n>` | `65536` | Target object size |
 | `--draft <n>` | `16` | MOQ draft version (14 or 16) |
@@ -75,13 +75,13 @@ on error, 2 on invalid arguments.
 ## Run: seekable file
 
 ```bash
-# Filtered single-program (default behavior).
+# Filtered single-program (default behavior) with a mux-rate hint.
 ./build-mock/moq2ts-cli --endpoint mock://local --namespace live/ch1 \
-    --video sample.ts --program 1
+    --video sample.ts --program 1 --mux-rate 38000000
 
-# Transparent whole-multiplex passthrough with a mux-rate hint.
+# Transparent whole-multiplex passthrough.
 ./build-mock/moq2ts-cli --endpoint mock://local --namespace live/ch1 \
-    --transparent --mux-rate 38000000 --video sample.ts
+    --transparent --video sample.ts
 ```
 
 ## Run: live feed over SRT
@@ -116,7 +116,7 @@ ffmpeg -re -i input.ts -c copy -f mpegts \
 
 # Publisher side: connect, ingest, publish.
 ./build/moq2ts-cli --endpoint <relay-url> --namespace live/ch1 \
-    --srt-config ./srt_callers.json --transparent --mux-rate 6000000
+    --srt-config ./srt_callers.json --transparent
 ```
 
 `pkt_size=1316` is worth keeping: 1316 = 7 x 188, so each SRT payload holds a
@@ -126,8 +126,9 @@ ingest side before the publisher ever sees the bytes.
 
 **SRT ingest always runs in transparent mode.** A contribution feed carries the
 whole multiplex, so the filtered-mode options (`--retain-si`, `--retain-null`,
-`--program`) do not apply and are ignored; passing them prints a warning. Use a
-file or FIFO source if you need filtered single-program publishing.
+`--program`) do not apply and are ignored; passing them prints a warning. The
+same goes for `--mux-rate`, which the catalog only carries in per-program mode.
+Use a file or FIFO source if you need filtered single-program publishing.
 
 ## Run: live feed from ffmpeg (server / near-encoder)
 
@@ -148,7 +149,7 @@ ffmpeg -re -y \
   -f mpegts -muxrate 6M -pcr_period 20 /tmp/live.ts &
 
 ./build/moq2ts-cli --endpoint <relay-url> --namespace live/ch1 \
-    --transparent --mux-rate 6000000 --video /tmp/live.ts
+    --transparent --video /tmp/live.ts
 ```
 
 ### Via a stdin pipe
@@ -158,7 +159,7 @@ ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" \
   -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
   -c:v libx264 -b:v 4M -c:a aac -f mpegts -muxrate 6M - \
   | ./build/moq2ts-cli --endpoint <relay-url> --namespace live/ch1 \
-        --transparent --mux-rate 6000000 --video /dev/stdin
+        --transparent --video /dev/stdin
 ```
 
 ## Verify byte-faithful passthrough
