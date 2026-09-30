@@ -126,6 +126,8 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
         // SHOULD NOT be included when isLive is false (MSF 5.1.6).
         root.insert(QStringLiteral("generatedAt"), catalog.generatedAtMs);
     }
+    root.insert(QStringLiteral("tracks"), tracks);
+    QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Compact);
     if (!catalog.initData.isEmpty()) {
         // MSF 5.1.7: each entry is {id, type, data}; MSFTS fixes type to
         // "inline" and requires the decoded data to be whole source packets, which
@@ -136,10 +138,13 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
         initEntry.insert(QStringLiteral("data"), QString::fromLatin1(catalog.initData.toBase64()));
         QJsonArray initDataList;
         initDataList.append(initEntry);
-        root.insert(QStringLiteral("initDataList"), initDataList);
+        // MSF 5.1.7 also says the list MUST be located after the tracks array.
+        // QJsonObject keeps its keys sorted, which would put "initDataList"
+        // first, so the list is appended to the serialized root instead.
+        json.chop(1);
+        json += ",\"initDataList\":" + QJsonDocument(initDataList).toJson(QJsonDocument::Compact) + '}';
     }
-    root.insert(QStringLiteral("tracks"), tracks);
-    return QJsonDocument(root).toJson(QJsonDocument::Compact);
+    return json;
 }
 
 bool MsftsMuxer::catalogFromJson(const QByteArray& json,

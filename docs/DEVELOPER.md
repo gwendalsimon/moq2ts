@@ -225,9 +225,6 @@ like:
 {
   "version": "draft-01",
   "generatedAt": 1779416505123,
-  "initDataList": [
-    { "id": "init-program-1", "type": "inline", "data": "R0AAEAAAs...==" }
-  ],
   "tracks": [
     {
       "name": "program-1",
@@ -249,6 +246,9 @@ like:
       "depends": ["program-1"],
       "mimeType": "application/json"
     }
+  ],
+  "initDataList": [
+    { "id": "init-program-1", "type": "inline", "data": "R0AAEAAAs...==" }
   ]
 }
 ```

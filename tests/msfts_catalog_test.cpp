@@ -65,6 +65,20 @@ int main() {
         ok &= expect(track.value("mpeg2tsSiPids").toArray().size() == 1, "per-program: SI PIDs");
     }
 
+    // initDataList follows the tracks array (MSF 5.1.7), and the document parses.
+    {
+        MsftsCatalog catalog = baseCatalog(Mpeg2tsMode::PerProgram);
+        catalog.generatedAtMs = 1;
+        const QByteArray json = MsftsMuxer::catalogJson(catalog);
+        const qsizetype tracksAt = json.indexOf("\"tracks\"");
+        const qsizetype listAt = json.indexOf("\"initDataList\"");
+        ok &= expect(tracksAt >= 0 && listAt > tracksAt, "initDataList after tracks");
+        MsftsCatalog parsed;
+        ok &= expect(MsftsMuxer::catalogFromJson(json, &parsed, nullptr, nullptr) &&
+                         parsed.initData == catalog.initData,
+                     "initData resolves through initRef");
+    }
+
     // The media timeline track is identified by packaging (MSF Table 3).
     {
         const QJsonArray tracks = QJsonDocument::fromJson(MsftsMuxer::catalogJson(baseCatalog(Mpeg2tsMode::PerProgram)))
