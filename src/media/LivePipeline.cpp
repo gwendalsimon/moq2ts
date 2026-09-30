@@ -6,9 +6,6 @@
 #include <thread>
 #include <QDateTime>
 #include <QDebug>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QThread>
 
 #include "EgressPacing.h"
@@ -28,27 +25,13 @@ std::uint64_t nowUnixUs() {
 // latency stays near zero; only objects arriving ahead of their media time wait.
 constexpr std::int64_t kPaceSlackUs = 8000;
 
-// Builds an MSF media timeline payload (draft-ietf-moq-msf-00 Section 7.1): a
-// JSON array of records, each a three-item array
-//   [ mediaPresentationTimeMs, [groupId, objectId], wallclockMs ]
-// where wallclock is milliseconds since the Unix epoch (0 when unknown). A
-// single timeline object carries one record here.
+// Builds an MSF media timeline payload (draft-ietf-moq-msf-01 Section 7.1): a
+// JSON array of records. A single timeline object carries one record here.
 QByteArray timelinePayload(std::uint64_t mediaGroupId,
                            std::uint64_t mediaObjectId,
                            std::uint64_t mediaTimeUs,
                            std::uint64_t wallClockUnixUs) {
-    QJsonArray location;
-    location.append(static_cast<qint64>(mediaGroupId));
-    location.append(static_cast<qint64>(mediaObjectId));
-
-    QJsonArray record;
-    record.append(static_cast<qint64>((mediaTimeUs + 500ULL) / 1000ULL));
-    record.append(location);
-    record.append(static_cast<qint64>((wallClockUnixUs + 500ULL) / 1000ULL));
-
-    QJsonArray records;
-    records.append(record);
-    return QJsonDocument(records).toJson(QJsonDocument::Compact);
+    return '[' + MsftsMuxer::mediaTimelineRecord(mediaTimeUs, mediaGroupId, mediaObjectId, wallClockUnixUs) + ']';
 }
 
 } // namespace
@@ -354,7 +337,7 @@ void LivePipeline::runLoop() {
     auto st = std::make_shared<PublishState>();
     st->packetizer = packetizerPtr;
 
-    auto nextObject = [this, st, packetsPerObject, trackName, timelineTrackName, timelineEveryObjects]() -> std::optional<PublishedObject> {
+    auto nextObject = [this, st, packetsPerObject, trackName, timelineTrackName, timelineEveryObjects, liveStream]() -> std::optional<PublishedObject> {
         if (!m_running.load(std::memory_order_acquire)) {
             return std::nullopt;
         }
@@ -384,10 +367,11 @@ void LivePipeline::runLoop() {
         if ((st->objects % timelineEveryObjects) == 0) {
             PublishedObject timeline;
             timeline.trackName = timelineTrackName;
+            // MSF 7.1.1: the wallclock time SHOULD be 0 for a VOD asset.
             timeline.payload = timelinePayload(published.groupId,
                                                published.objectId,
                                                published.mediaTimeUs,
-                                               nowUnixUs());
+                                               liveStream ? nowUnixUs() : 0);
             timeline.groupId = published.groupId;
             timeline.objectId = st->timelineObjectId++;
             timeline.mediaTimeUs = published.mediaTimeUs;

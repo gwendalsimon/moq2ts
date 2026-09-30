@@ -147,6 +147,21 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     return json;
 }
 
+QByteArray MsftsMuxer::mediaTimelineRecord(std::uint64_t mediaTimeUs,
+                                           std::uint64_t groupId,
+                                           std::uint64_t objectId,
+                                           std::uint64_t wallclockUnixUs) {
+    QJsonArray location;
+    location.append(static_cast<qint64>(groupId));
+    location.append(static_cast<qint64>(objectId));
+
+    QJsonArray record;
+    record.append(static_cast<qint64>(mediaTimeUs / 1000ULL));
+    record.append(location);
+    record.append(static_cast<qint64>(wallclockUnixUs / 1000ULL));
+    return QJsonDocument(record).toJson(QJsonDocument::Compact);
+}
+
 bool MsftsMuxer::catalogFromJson(const QByteArray& json,
                                  MsftsCatalog* out,
                                  QString* mediaTrackName,

@@ -79,6 +79,12 @@ int main() {
                      "initData resolves through initRef");
     }
 
+    // Media timeline records take the floor in milliseconds (MSF 7.1.1).
+    ok &= expect(MsftsMuxer::mediaTimelineRecord(10010999, 3, 0, 1759924158381999) == "[10010,[3,0],1759924158381]",
+                 "timeline record floors both times");
+    ok &= expect(MsftsMuxer::mediaTimelineRecord(999, 0, 0, 0) == "[0,[0,0],0]",
+                 "timeline record floors below one millisecond");
+
     // The media timeline track is identified by packaging (MSF Table 3).
     {
         const QJsonArray tracks = QJsonDocument::fromJson(MsftsMuxer::catalogJson(baseCatalog(Mpeg2tsMode::PerProgram)))

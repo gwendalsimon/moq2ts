@@ -4,6 +4,8 @@
 #include <QList>
 #include <QString>
 
+#include <cstdint>
+
 namespace moq2ts {
 
 // The four values of mpeg2tsMode (draft-gregoire-moq-msfts).
@@ -68,6 +70,15 @@ struct MsftsCatalog {
 class MsftsMuxer {
 public:
     static QByteArray catalogJson(const MsftsCatalog& catalog);
+
+    // One MSF media timeline record (draft-ietf-moq-msf-01 Section 7.1.1):
+    //   [mediaPresentationTimeMs, [groupId, objectId], wallclockMs]
+    // Both times are the floor in integral milliseconds. wallclockUnixUs is 0
+    // when the wallclock time is unknown, as for a VOD asset.
+    static QByteArray mediaTimelineRecord(std::uint64_t mediaTimeUs,
+                                          std::uint64_t groupId,
+                                          std::uint64_t objectId,
+                                          std::uint64_t wallclockUnixUs);
 
     // Inverse of catalogJson: parse an MSFTS catalog document and fill the
     // mpeg2ts media-track fields a receiver needs (packetSize, mode,
