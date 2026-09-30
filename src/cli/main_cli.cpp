@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
     addValue(QStringLiteral("segment-bytes"), QStringLiteral("Target object size (bytes)."), QStringLiteral("bytes"), QStringLiteral("65536"));
     addValue(QStringLiteral("program"), QStringLiteral("MPEG program number (0 = first)."), QStringLiteral("n"), QStringLiteral("0"));
     // MSFTS carriage-profile options (msfts#7).
-    addValue(QStringLiteral("mux-rate"), QStringLiteral("Advisory source mux rate (bits/s), per-program mode only; 0 omits the catalog hint."),
+    addValue(QStringLiteral("mux-rate"), QStringLiteral("Advisory source mux rate (bits/s); 0 omits the catalog hint. Dropped when a transparent source lists several programs."),
              QStringLiteral("bps"), QStringLiteral("0"));
     parser.addOption(QCommandLineOption(QStringLiteral("transparent"),
         QStringLiteral("Transparent/whole-multiplex passthrough (no PID filtering or rewrite).")));
