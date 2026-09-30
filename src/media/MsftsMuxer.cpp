@@ -98,15 +98,16 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     tracks.append(mediaTrack);
 
     if (!catalog.timelineTrack.isEmpty()) {
-        // MSF media timeline track (draft-ietf-moq-msf-00 Section 7.2): identified
-        // by type "mediatimeline", a "depends" list of the track names it applies
-        // to, and an application/json mime type.
+        // MSF media timeline track (draft-ietf-moq-msf-01 Section 7.2): identified
+        // by packaging "mediatimeline" (Table 3), a "depends" list of the track
+        // names it applies to, and an application/json mime type. Section 7.2
+        // says 'type', but MSF defines no such field (moq-wg/msf#213).
         QJsonObject timelineTrack;
         timelineTrack.insert(QStringLiteral("name"), catalog.timelineTrack);
         if (!catalog.namespaceName.isEmpty()) {
             timelineTrack.insert(QStringLiteral("namespace"), catalog.namespaceName);
         }
-        timelineTrack.insert(QStringLiteral("type"), QStringLiteral("mediatimeline"));
+        timelineTrack.insert(QStringLiteral("packaging"), QStringLiteral("mediatimeline"));
         QJsonArray depends;
         depends.append(catalog.track);
         timelineTrack.insert(QStringLiteral("depends"), depends);

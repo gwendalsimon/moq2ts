@@ -67,7 +67,7 @@ media publishing. It currently provides:
   and `unmodified-program` modes, and `mpeg2tsRandomAccess` when every group starts on a random-access
   point).
 - `MsftsMuxer` also adds a `<stream>.timeline` track of MSF
-  `type: "mediatimeline"` that `depends` on the media track.
+  `packaging: "mediatimeline"` that `depends` on the media track.
 - Whole source packets are grouped into MOQT Object payloads and exposed to
   `MoqxrPublisher::publishLiveObjects(...)`.
 - `LivePipeline` interleaves timeline objects at stream start and roughly once
@@ -245,7 +245,7 @@ like:
     },
     {
       "name": "program-1.timeline",
-      "type": "mediatimeline",
+      "packaging": "mediatimeline",
       "depends": ["program-1"],
       "mimeType": "application/json"
     }
@@ -281,7 +281,7 @@ Field presence is conditional:
 
 The timeline track is separate from the M2TS media track so media object payloads
 remain draft-MSFTS-clean. It is an MSF media timeline track
-(`draft-ietf-moq-msf-00` Section 7.2): MSF `type: "mediatimeline"`, a `depends`
+(`draft-ietf-moq-msf-01` Section 7.2): MSF `packaging: "mediatimeline"`, a `depends`
 list naming the media track(s) it applies to, and an `application/json` MIME
 type (see the catalog example above).
 

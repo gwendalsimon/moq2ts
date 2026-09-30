@@ -65,6 +65,16 @@ int main() {
         ok &= expect(track.value("mpeg2tsSiPids").toArray().size() == 1, "per-program: SI PIDs");
     }
 
+    // The media timeline track is identified by packaging (MSF Table 3).
+    {
+        const QJsonArray tracks = QJsonDocument::fromJson(MsftsMuxer::catalogJson(baseCatalog(Mpeg2tsMode::PerProgram)))
+                                      .object().value(QStringLiteral("tracks")).toArray();
+        const QJsonObject timeline = tracks.at(1).toObject();
+        ok &= expect(timeline.value("packaging").toString() == "mediatimeline", "timeline: packaging");
+        ok &= expect(!timeline.contains("type"), "timeline: no type field");
+        ok &= expect(timeline.value("depends").toArray().at(0).toString() == "program-1", "timeline: depends");
+    }
+
     // The parser reads each TS-packet mode back, and skips es-packets.
     for (const Mpeg2tsMode mode : {Mpeg2tsMode::UnmodifiedProgram, Mpeg2tsMode::UnmodifiedMultiplex,
                                    Mpeg2tsMode::PerProgram}) {

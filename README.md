@@ -153,7 +153,7 @@ exists. Launch the packaged app with:
   elementary PIDs for that program. Packets for other programs and null packets
   are dropped before publication.
 - **Timeline track**: each media track gets a `<stream>.timeline` side track of
-  MSF `type: "mediatimeline"` that `depends` on the media track. Timeline objects
+  MSF `packaging: "mediatimeline"` that `depends` on the media track. Timeline objects
   are a compact `[mediaTimeMs, [groupId, objectId], wallclockMs]` record array
   mapping media presentation time to Unix wall-clock milliseconds without
   modifying M2TS payloads.
