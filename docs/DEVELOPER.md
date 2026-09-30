@@ -70,9 +70,9 @@ media publishing. It currently provides:
   `packaging: "mediatimeline"` that `depends` on the media track.
 - Whole source packets are grouped into MOQT Object payloads and exposed to
   `MoqxrPublisher::publishLiveObjects(...)`.
-- `LivePipeline` interleaves timeline objects at stream start and roughly once
-  per second. These timeline objects map the most recent media object to Unix
-  wall-clock time in milliseconds.
+- `LivePipeline` adds one timeline record per media Group and publishes the
+  whole record history as the first Object of the timeline Group of the same
+  number (MSF Section 7.3).
 
 ## File-level map
 
@@ -293,10 +293,19 @@ records, where each record is a three-item array
 ```
 
 with the items being `mediaPresentationTimeMs`, `[groupId, objectId]`, and
-`wallclockMs` (milliseconds since the Unix epoch, `0` when unknown). A single
-timeline object carries one record. `LivePipeline` emits one at stream start and
-then roughly once per second (every `1000 / fragmentDurationMs` media objects),
-mapping the most recent media object's presentation time to wall-clock time.
+`wallclockMs` (milliseconds since the Unix epoch), each the floor in integral
+milliseconds (MSF Section 7.1.1).
+
+`LivePipeline` adds one record per media Group. On the file and pipe path, the
+record points at the first Object of the Group that starts a video PES, and
+carries that PES's PTS. On the capture path, it points at the first Object of
+the Group and carries the capture media time. The wallclock time is the publish
+time on a live source and `0` on a VOD file.
+
+MSF Section 7.3 makes the first Object of each timeline Group an independent
+timeline. The timeline track therefore publishes one Object per media Group, in
+the Group of the same number, and that Object carries every record so far. The
+history has no bound yet; moq-wg/msf#205 discusses one.
 
 ## Runtime operational guidance
 
