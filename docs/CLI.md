@@ -58,10 +58,10 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--srt-config <path>` | - | SRT ingest: JSON caller config (see below). Takes the place of `--video`, and implies `--transparent` |
 | `--camera <id>` / `--mic <id>` | - | Capture device ids (instead of a TS source) |
 | `--program <n>` | `0` | MPEG program to select (0 = first); ignored with `--transparent` |
-| `--transparent` | off | Carry the **whole multiplex verbatim** (no PID filter/rewrite, no initialization data) |
+| `--transparent` | off | Carry the **whole multiplex verbatim** (no PID filter/rewrite, no initialization data). Declared `unmodified-program` when the source PAT lists one program, `unmodified-multiplex` otherwise |
 | `--retain-si` | off | Filtered mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT) |
 | `--retain-null` | off | Filtered mode: also keep null (0x1FFF) packets |
-| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s (0 omits the catalog hint). Per-program mode only: the draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--transparent` and SRT ingest ignore it with a warning |
+| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s (0 omits the catalog hint). The draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--transparent` and SRT ingest drop it when the source PAT lists several programs, and warn |
 | `--fragment-ms <ms>` | `250` | Group cadence |
 | `--segment-bytes <n>` | `65536` | Target object size |
 | `--draft <n>` | `16` | MOQ draft version (14 or 16) |
@@ -168,9 +168,11 @@ For a file source in transparent mode the published payload must equal the input
 byte-for-byte. Under the mock build, the mock publisher logs objects to stderr;
 for a fidelity check, capture the emitted payloads and `cmp` against the source
 `.ts`. The catalog JSON (also logged) should contain
-`"mpeg2tsMode":"unmodified-multiplex"`, and must NOT contain
-`mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`,
-`mpeg2tsSiPids`, or a root `initDataList`.
+`"mpeg2tsMode":"unmodified-program"` when the source PAT lists one program,
+and `"mpeg2tsMode":"unmodified-multiplex"` otherwise. Neither contains
+`mpeg2tsSiPids` or a root `initDataList`. An `unmodified-multiplex` catalog
+must NOT contain `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, or
+`mpeg2tsMuxRate`.
 
 In filtered mode the PAT/PMT bootstrap is carried the way MSF-01 defines it: the
 track gets an `initRef` string, and the bytes live in a root `initDataList` entry

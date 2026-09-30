@@ -64,7 +64,7 @@ media publishing. It currently provides:
   fields (`isLive`, `role`, `mimeType`, `targetLatency` when live, optional
   `bitrate`) and MSFTS mpeg2ts fields (`mpeg2tsMode`, `mpeg2tsPacketSize`,
   `mpeg2tsProgramNumber` and optional `mpeg2tsPcrPid` on the `per-program`
-  mode, and `mpeg2tsRandomAccess` when every group starts on a random-access
+  and `unmodified-program` modes, and `mpeg2tsRandomAccess` when every group starts on a random-access
   point).
 - `MsftsMuxer` also adds a `<stream>.timeline` track of MSF
   `type: "mediatimeline"` that `depends` on the media track.
@@ -217,8 +217,8 @@ PID in the source multiplex.
 
 `MsftsMuxer::catalogJson` emits a compact MSF catalog (`draft-ietf-moq-msf-01`
 common fields plus `draft-gregoire-moq-msfts` mpeg2ts fields). This encoder
-only produces the `unmodified-multiplex` and `per-program` values of the
-required `mpeg2tsMode` field. A live capture catalog (`per-program`) looks
+produces the `unmodified-program`, `unmodified-multiplex`, and `per-program`
+values of the required `mpeg2tsMode` field, and never `es-packets`. A live capture catalog (`per-program`) looks
 like:
 
 ```json
@@ -253,7 +253,9 @@ like:
 }
 ```
 
-An `unmodified-multiplex` (`--transparent`) track omits
+A `--transparent` track is `unmodified-program` when the source PAT lists one
+program. It then carries `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` like a
+`per-program` track. Otherwise it is `unmodified-multiplex`, which omits
 `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, and
 `mpeg2tsSiPids` — the draft requires them absent when the publisher selects
 no program.
@@ -266,9 +268,10 @@ Field presence is conditional:
   is the inverse — VOD only, present only when `isLive` is false and the value is
   positive (MSF 5.1.37).
 - `bitrate` is emitted only when greater than zero.
-- `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, and
-  `mpeg2tsSiPids` are emitted only in `per-program` mode; `mpeg2tsPcrPid` is
-  further gated on being known (PID >= 0).
+- `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, and `mpeg2tsMuxRate` are emitted
+  in every mode except `unmodified-multiplex`; `mpeg2tsPcrPid` is further
+  gated on being known (PID >= 0), and `mpeg2tsMuxRate` on being positive.
+- `mpeg2tsSiPids` is emitted only in `per-program` mode.
 - `mpeg2tsTimestampMode` is valid only for 192-octet source packets and MUST
   NOT appear for 188.
 - `mpeg2tsRandomAccess` is advertised only when every MOQT group begins at a

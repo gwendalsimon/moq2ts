@@ -66,6 +66,26 @@ bool extractPsiSection(const QByteArray& tsPacket, QByteArray* section) {
     return true;
 }
 
+// Number of programs a PAT section lists, not counting program_number 0 (the
+// network PID). Returns -1 when the section is not a PAT.
+int countPatPrograms(const QByteArray& section) {
+    if (section.size() < 12 || static_cast<unsigned char>(section[0]) != 0x00) {
+        return -1;
+    }
+    const int sectionLength = ((static_cast<unsigned char>(section[1]) & 0x0f) << 8) |
+                              static_cast<unsigned char>(section[2]);
+    const int entriesEnd = 3 + sectionLength - 4;
+    int count = 0;
+    for (int offset = 8; offset + 4 <= entriesEnd; offset += 4) {
+        const int program = (static_cast<unsigned char>(section[offset]) << 8) |
+                            static_cast<unsigned char>(section[offset + 1]);
+        if (program != 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 bool findPatProgram(const QByteArray& section, int requestedProgram, int* programNumber, int* pmtPid) {
     if (section.size() < 12 || static_cast<unsigned char>(section[0]) != 0x00) {
         return false;
@@ -255,6 +275,7 @@ bool M2tsPacketizer::collectInitData(QString* error) {
             if (extractPsiSection(tsPacket, &patSection) &&
                 findPatProgram(patSection, m_requestedProgramNumber, &m_programNumber, &m_pmtPid)) {
                 patPacket = sourcePacket;
+                m_patProgramCount = countPatPrograms(patSection);
             }
         } else if (m_pmtPid >= 0 && pid == m_pmtPid && pmtPacket.isEmpty()) {
             QByteArray pmtSection;
@@ -355,7 +376,11 @@ bool M2tsPacketizer::identifyVideoPid(QString* error) {
         if (pid == 0 && pmtPid < 0) {
             QByteArray patSection;
             if (extractPsiSection(tsPacket, &patSection)) {
-                findPatProgram(patSection, m_requestedProgramNumber, &programNumber, &pmtPid);
+                m_patProgramCount = std::max(0, countPatPrograms(patSection));
+                // A single-program source has only one program to describe, so
+                // the requested number does not apply to it.
+                findPatProgram(patSection, m_patProgramCount == 1 ? 0 : m_requestedProgramNumber,
+                               &programNumber, &pmtPid);
             }
         } else if (pmtPid >= 0 && pid == pmtPid && pcrPid < 0) {
             QByteArray pmtSection;
@@ -518,6 +543,10 @@ int M2tsPacketizer::pmtPid() const {
 
 int M2tsPacketizer::pcrPid() const {
     return m_pcrPid;
+}
+
+int M2tsPacketizer::patProgramCount() const {
+    return m_patProgramCount;
 }
 
 QByteArray M2tsPacketizer::initData() const {

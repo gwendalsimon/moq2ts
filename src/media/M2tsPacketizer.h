@@ -39,6 +39,10 @@ public:
     int programNumber() const;
     int pmtPid() const;
     int pcrPid() const;
+    // Programs listed in the first PAT read at open(), not counting the network
+    // PID entry. 0 when no PAT was parsed. A source whose PAT lists one program
+    // is a single-program transport stream.
+    int patProgramCount() const;
     // DVB SI PIDs kept alongside the selected program by setRetainSiTables().
     // Empty unless retention is on, which is what the catalog advertises as
     // m2tsSiPids: PIDs retained in the filtered track beyond those in the PMT.
@@ -68,6 +72,7 @@ private:
     int m_programNumber = 1;
     int m_pmtPid = -1;
     int m_pcrPid = -1;
+    int m_patProgramCount = 0;
     std::set<int> m_selectedPids;
     QByteArray m_initData;
     std::uint64_t m_nextObjectId = 0;

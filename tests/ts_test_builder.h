@@ -1,0 +1,134 @@
+#pragma once
+
+// Builds synthetic 188-octet TS packets for unit tests: PAT and PMT sections
+// with valid CRC_32 values, and video PES packets with a PTS.
+
+#include <QByteArray>
+#include <QList>
+
+#include <cstdint>
+#include <utility>
+
+namespace moq2ts::test {
+
+// MPEG-2 CRC_32 (ISO/IEC 13818-1 Annex A): polynomial 0x04C11DB7, initial value
+// 0xFFFFFFFF, no reflection, no final XOR.
+inline std::uint32_t mpegCrc32(const QByteArray& data) {
+    std::uint32_t crc = 0xFFFFFFFFu;
+    for (const char byte : data) {
+        crc ^= static_cast<std::uint32_t>(static_cast<unsigned char>(byte)) << 24;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc & 0x80000000u) ? (crc << 1) ^ 0x04C11DB7u : crc << 1;
+        }
+    }
+    return crc;
+}
+
+inline void appendU16(QByteArray* out, int value) {
+    out->append(static_cast<char>((value >> 8) & 0xFF));
+    out->append(static_cast<char>(value & 0xFF));
+}
+
+// Completes a section: fills section_length and appends the CRC_32.
+inline QByteArray finishSection(QByteArray section) {
+    const int sectionLength = section.size() - 3 + 4;
+    section[1] = static_cast<char>((static_cast<unsigned char>(section[1]) & 0xF0) | ((sectionLength >> 8) & 0x0F));
+    section[2] = static_cast<char>(sectionLength & 0xFF);
+    const std::uint32_t crc = mpegCrc32(section);
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        section.append(static_cast<char>((crc >> shift) & 0xFF));
+    }
+    return section;
+}
+
+// PAT listing (program_number, PMT PID) pairs.
+inline QByteArray patSection(const QList<std::pair<int, int>>& programs) {
+    QByteArray section;
+    section.append(char(0x00));          // table_id
+    section.append(char(0xB0));          // section_syntax_indicator, length filled later
+    section.append(char(0x00));
+    appendU16(&section, 1);              // transport_stream_id
+    section.append(char(0xC1));          // version 0, current_next_indicator
+    section.append(char(0x00));          // section_number
+    section.append(char(0x00));          // last_section_number
+    for (const auto& [program, pmtPid] : programs) {
+        appendU16(&section, program);
+        appendU16(&section, 0xE000 | pmtPid);
+    }
+    return finishSection(section);
+}
+
+// PMT of one program: (stream_type, elementary PID) pairs.
+inline QByteArray pmtSection(int programNumber, int pcrPid, const QList<std::pair<int, int>>& streams) {
+    QByteArray section;
+    section.append(char(0x02));          // table_id
+    section.append(char(0xB0));
+    section.append(char(0x00));
+    appendU16(&section, programNumber);
+    section.append(char(0xC1));
+    section.append(char(0x00));
+    section.append(char(0x00));
+    appendU16(&section, 0xE000 | pcrPid);
+    appendU16(&section, 0xF000);         // program_info_length 0
+    for (const auto& [streamType, pid] : streams) {
+        section.append(static_cast<char>(streamType));
+        appendU16(&section, 0xE000 | pid);
+        appendU16(&section, 0xF000);     // ES_info_length 0
+    }
+    return finishSection(section);
+}
+
+// One TS packet on pid. When adaptation is set, the packet carries an adaptation
+// field with the given flags byte (0x40 = random_access_indicator). The payload
+// is padded with 0xFF stuffing.
+inline QByteArray tsPacket(int pid, bool payloadUnitStart, const QByteArray& payload,
+                           int continuityCounter = 0, int adaptationFlags = -1) {
+    QByteArray packet;
+    packet.append(char(0x47));
+    packet.append(static_cast<char>((payloadUnitStart ? 0x40 : 0x00) | ((pid >> 8) & 0x1F)));
+    packet.append(static_cast<char>(pid & 0xFF));
+    const bool adaptation = adaptationFlags >= 0;
+    packet.append(static_cast<char>((adaptation ? 0x30 : 0x10) | (continuityCounter & 0x0F)));
+    if (adaptation) {
+        const int stuffing = 188 - 4 - 2 - payload.size();
+        packet.append(static_cast<char>(1 + stuffing));   // adaptation_field_length
+        packet.append(static_cast<char>(adaptationFlags));
+        packet.append(QByteArray(stuffing, char(0xFF)));
+        packet.append(payload);
+    } else {
+        packet.append(payload);
+        packet.append(QByteArray(188 - packet.size(), char(0xFF)));
+    }
+    return packet.left(188);
+}
+
+// A PSI packet: pointer_field 0 followed by the section.
+inline QByteArray psiPacket(int pid, const QByteArray& section, int continuityCounter = 0) {
+    QByteArray payload;
+    payload.append(char(0x00));
+    payload.append(section);
+    return tsPacket(pid, true, payload, continuityCounter);
+}
+
+// The start of a video PES packet with a PTS (33 bits, 90 kHz).
+inline QByteArray pesHeaderWithPts(std::uint64_t pts) {
+    QByteArray pes;
+    pes.append(char(0x00));
+    pes.append(char(0x00));
+    pes.append(char(0x01));
+    pes.append(char(0xE0));                  // stream_id: video
+    pes.append(char(0x00));
+    pes.append(char(0x00));                  // PES_packet_length 0 (unbounded)
+    pes.append(char(0x80));                  // marker bits
+    pes.append(char(0x80));                  // PTS_DTS_flags = '10'
+    pes.append(char(0x05));                  // PES_header_data_length
+    pes.append(static_cast<char>(0x21 | ((pts >> 29) & 0x0E)));
+    pes.append(static_cast<char>((pts >> 22) & 0xFF));
+    pes.append(static_cast<char>(0x01 | ((pts >> 14) & 0xFE)));
+    pes.append(static_cast<char>((pts >> 7) & 0xFF));
+    pes.append(static_cast<char>(0x01 | ((pts << 1) & 0xFE)));
+    pes.append(QByteArray(8, char(0x00)));   // start of the elementary stream
+    return pes;
+}
+
+} // namespace moq2ts::test

@@ -403,3 +403,31 @@ if(UNIX AND NOT APPLE)
     target_include_directories(moq2ts-ts-ring-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME moq2ts-ts-ring-tests COMMAND moq2ts-ts-ring-tests)
 endif()
+
+# MSFTS catalog writer and parser test (Qt Core only).
+if(UNIX AND NOT APPLE)
+    enable_testing()
+    add_executable(moq2ts-msfts-catalog-tests
+        tests/msfts_catalog_test.cpp
+        src/media/MsftsMuxer.cpp
+    )
+    target_include_directories(moq2ts-msfts-catalog-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-msfts-catalog-tests PRIVATE ${CORE_QT_LIBS})
+    add_test(NAME moq2ts-msfts-catalog-tests COMMAND moq2ts-msfts-catalog-tests)
+endif()
+
+# Packetizer test on synthetic TS files. libav is linked when present, because
+# the packetizer's duration probe uses it.
+if(UNIX AND NOT APPLE)
+    enable_testing()
+    add_executable(moq2ts-m2ts-packetizer-tests
+        tests/m2ts_packetizer_test.cpp
+        src/media/M2tsPacketizer.cpp
+    )
+    target_include_directories(moq2ts-m2ts-packetizer-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-m2ts-packetizer-tests PRIVATE ${CORE_QT_LIBS})
+    if(TARGET PkgConfig::LIBAVFORMAT)
+        target_link_libraries(moq2ts-m2ts-packetizer-tests PRIVATE PkgConfig::LIBAVFORMAT PkgConfig::LIBAVUTIL)
+    endif()
+    add_test(NAME moq2ts-m2ts-packetizer-tests COMMAND moq2ts-m2ts-packetizer-tests)
+endif()

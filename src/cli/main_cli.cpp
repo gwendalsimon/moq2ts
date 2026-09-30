@@ -300,10 +300,12 @@ int main(int argc, char** argv) {
 
     // The draft forbids mpeg2tsMuxRate in unmodified-multiplex mode, so the
     // catalog drops it; say so rather than accepting a value that does nothing.
+    // Whether a transparent source is a multiplex is known only once its PAT
+    // is read, so the warning names the condition.
     if (cfg.transparentMode && cfg.mpeg2tsMuxRateBps > 0) {
         logLine(stderr, "warn",
-                QStringLiteral("--mux-rate is only emitted in per-program mode; transparent "
-                               "(unmodified-multiplex) publishing ignores it."));
+                QStringLiteral("--mux-rate is ignored in transparent publishing when the source "
+                               "PAT lists several programs (unmodified-multiplex)."));
     }
 
     // Validation mirrors the GUI guards.

@@ -317,7 +317,13 @@ void LivePipeline::runLoop() {
         .namespaceName = m_config.namespaceName,
         .trackDurationMs = fileDurationMs,
         .randomAccess = true,
-        .wholeMultiplex = m_config.transparentMode,
+        // Transparent carriage forwards the source unchanged. The draft calls it
+        // unmodified-program when the PAT lists one program, and forbids
+        // unmodified-multiplex for such a source. A PAT that was not parsed
+        // (count 0) cannot prove a single program, so it stays a multiplex.
+        .mode = !m_config.transparentMode             ? Mpeg2tsMode::PerProgram
+                : packetizer.patProgramCount() == 1   ? Mpeg2tsMode::UnmodifiedProgram
+                                                      : Mpeg2tsMode::UnmodifiedMultiplex,
         .mpeg2tsMuxRateBps = m_config.mpeg2tsMuxRateBps,
         .isLive = false,
         .bitrateBps = static_cast<qint64>(m_config.videoTargetBitrateKbps) * 1000,

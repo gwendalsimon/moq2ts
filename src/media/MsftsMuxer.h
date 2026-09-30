@@ -6,6 +6,14 @@
 
 namespace moq2ts {
 
+// The four values of mpeg2tsMode (draft-gregoire-moq-msfts).
+enum class Mpeg2tsMode {
+    UnmodifiedProgram,
+    UnmodifiedMultiplex,
+    PerProgram,
+    EsPackets,
+};
+
 struct MsftsCatalog {
     QString track;
     int packetSize = 188;
@@ -38,13 +46,14 @@ struct MsftsCatalog {
     // MOQT group begins at a random-access point.
     bool randomAccess = false;
 
-    // Whole-multiplex (transparent) profile: when true the track carries the
-    // full multiplex verbatim. Advertised as mpeg2tsMode "unmodified-multiplex"
-    // (draft-gregoire-moq-msfts); when false, advertised as "per-program" and
-    // the per-program fields (mpeg2tsProgramNumber/mpeg2tsPcrPid) are included.
-    bool wholeMultiplex = false;
+    // Advertised as mpeg2tsMode (draft-gregoire-moq-msfts). The two unmodified
+    // modes carry the source verbatim: UnmodifiedProgram when its PAT lists one
+    // program, UnmodifiedMultiplex otherwise. PerProgram is a program derived by
+    // filtering. This encoder never produces EsPackets; the parser recognizes it
+    // only to skip such tracks.
+    Mpeg2tsMode mode = Mpeg2tsMode::PerProgram;
     // Advisory source constant mux rate in bits/s. Emitted as mpeg2tsMuxRate
-    // only when > 0 and the track is not whole-multiplex.
+    // only when > 0 and the mode is not UnmodifiedMultiplex.
     qint64 mpeg2tsMuxRateBps = 0;
 
     // MSF common track/root fields (draft-ietf-moq-msf-00).
@@ -61,7 +70,7 @@ public:
     static QByteArray catalogJson(const MsftsCatalog& catalog);
 
     // Inverse of catalogJson: parse an MSFTS catalog document and fill the
-    // mpeg2ts media-track fields a receiver needs (packetSize, wholeMultiplex,
+    // mpeg2ts media-track fields a receiver needs (packetSize, mode,
     // program/pcr, muxRate, randomAccess, timestampMode, isLive, decoded
     // initData). The media track's name is returned via mediaTrackName. Returns
     // false (and sets error) when the document is invalid or has no mpeg2ts
