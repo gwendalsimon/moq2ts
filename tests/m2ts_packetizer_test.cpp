@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QTemporaryDir>
 
+#include <cstdint>
 #include <iostream>
 #include <string>
 
@@ -71,6 +72,42 @@ int main() {
         ok &= expect(single.open(7, &error), "transparent SPTS opens with --program 7");
         ok &= expect(single.programNumber() == 1 && single.pcrPid() == 0x100,
                      "transparent SPTS describes its own program");
+    }
+
+    // Object media time: the PTS of the first video PES in each Object, on the
+    // PMT's video PID even when an audio PES comes first and the PCR has its own
+    // PID. Two packets per Object.
+    {
+        constexpr std::uint64_t kWrap = std::uint64_t{1} << 33;
+        const auto video = [](std::uint64_t pts, int cc) { return tb::tsPacket(0x100, true, tb::pesHeaderWithPts(pts), cc); };
+        const auto audio = [](std::uint64_t pts, int cc) { return tb::tsPacket(0x101, true, tb::pesHeaderWithPts(pts), cc); };
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x1FF, {{0x0F, 0x101}, {0x1B, 0x100}}));
+        ts += audio(1000, 0) + video(900900, 0);                               // Object 1
+        ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), 1) + audio(2000, 1);  // Object 2
+        ts += video(kWrap - 90, 2) + tb::tsPacket(0x1FF, false, QByteArray(184, char(0)), 0);  // Object 3
+        ts += video(450, 3) + video(451, 4);                                   // Object 4
+        const QString path = dir.filePath("pts.ts");
+        ok &= expect(writeFile(path, ts), "write PTS stream");
+
+        for (const bool transparent : {true, false}) {
+            const std::string label = transparent ? "transparent" : "filtered";
+            M2tsPacketizer packetizer(path);
+            packetizer.setTransparent(transparent);
+            QString error;
+            ok &= expect(packetizer.open(0, &error), label + " PTS stream opens: " + error.toStdString());
+            M2tsObject object;
+            ok &= expect(packetizer.readObject(2, &object, &error) && !object.ptsUs.has_value(),
+                         label + ": PAT and PMT carry no PTS");
+            ok &= expect(packetizer.readObject(2, &object, &error) && object.ptsUs == std::uint64_t{10010000},
+                         label + ": video PTS, not the audio PTS before it");
+            ok &= expect(packetizer.readObject(2, &object, &error) && !object.ptsUs.has_value(),
+                         label + ": no video PES start, no PTS");
+            ok &= expect(packetizer.readObject(2, &object, &error) && object.ptsUs == (kWrap - 90) * 100 / 9,
+                         label + ": PTS before the wrap");
+            ok &= expect(packetizer.readObject(2, &object, &error) && object.ptsUs == (kWrap + 450) * 100 / 9,
+                         label + ": PTS unwrapped past 2^33");
+        }
     }
 
     if (ok) {

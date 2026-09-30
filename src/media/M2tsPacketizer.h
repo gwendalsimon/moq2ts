@@ -6,6 +6,7 @@
 #include <QString>
 
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <utility>
 
@@ -21,6 +22,10 @@ struct M2tsObject {
     // Media time (microseconds, capture-epoch relative) of the most recent video
     // frame whose bytes are in this object. 0 for the file-source path.
     std::uint64_t mediaTimeUs = 0;
+    // PTS of the first video PES packet that starts in this object, in
+    // microseconds, unwrapped past the 33-bit range. Empty when no video PES
+    // starts in it. Set by the file-source path only.
+    std::optional<std::uint64_t> ptsUs;
 };
 
 class M2tsPacketizer final {
@@ -64,6 +69,7 @@ private:
     bool packetHasSync(const QByteArray& packet) const;
     QByteArray tsPacketView(const QByteArray& sourcePacket) const;
     bool hasRandomAccessIndicator(const QByteArray& tsPacket) const;
+    std::uint64_t unwrapPts(std::int64_t pts);
 
     QString m_sourcePath;
     QFile m_file;
@@ -73,6 +79,10 @@ private:
     int m_pmtPid = -1;
     int m_pcrPid = -1;
     int m_patProgramCount = 0;
+    // First video elementary PID of the PMT; the PTS source for Object media time.
+    int m_videoPid = -1;
+    std::int64_t m_lastPts = -1;
+    std::uint64_t m_ptsWrapOffset = 0;
     std::set<int> m_selectedPids;
     QByteArray m_initData;
     std::uint64_t m_nextObjectId = 0;
