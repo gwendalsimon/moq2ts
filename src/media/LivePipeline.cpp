@@ -308,10 +308,8 @@ void LivePipeline::runLoop() {
         .namespaceName = m_config.namespaceName,
         .trackDurationMs = fileDurationMs,
         .randomAccess = true,
-        // Transparent carriage forwards the source unchanged. The draft calls it
-        // unmodified-program when the PAT lists one program, and forbids
-        // unmodified-multiplex for such a source. A PAT that was not parsed
-        // (count 0) cannot prove a single program, so it stays a multiplex.
+        // Unmodified carriage: unmodified-program for a one-program PAT,
+        // unmodified-multiplex otherwise (an unparsed PAT counts as a multiplex).
         .mode = !m_config.transparentMode             ? Mpeg2tsMode::PerProgram
                 : packetizer.patProgramCount() == 1   ? Mpeg2tsMode::UnmodifiedProgram
                                                       : Mpeg2tsMode::UnmodifiedMultiplex,

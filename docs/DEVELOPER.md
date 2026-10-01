@@ -253,7 +253,7 @@ like:
 }
 ```
 
-A `--transparent` track is `unmodified-program` when the source PAT lists one
+An `--unmodified` track is `unmodified-program` when the source PAT lists one
 program. It then carries `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` like a
 `per-program` track. Otherwise it is `unmodified-multiplex`, which omits
 `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, and
