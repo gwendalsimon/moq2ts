@@ -158,6 +158,11 @@ private:
     bool selectProgramPids(QString* error);
     void selectPids();
     void refreshInitData();
+    // Per-program carriage: the rewriter of a table PID other than the PAT,
+    // or nullptr, and the decision for each of its sections.
+    SectionRewriter* rewriterFor(int pid);
+    SectionRewriter::Decision rewriteSection(int pid, const QByteArray& section);
+    SectionRewriter::Decision rewriteCat(const QByteArray& section);
     // Stops the track: readObject returns false with this reason from now on.
     void endTrack(const QString& reason);
     // Per-program carriage: the PAT that lists the selected program only.
@@ -190,6 +195,12 @@ private:
     std::vector<std::pair<int, int>> m_patPrograms;
     int m_networkPid = -1;
     std::set<int> m_elementaryPids;
+    // Conditional access: the ECM PIDs and CA systems of the PMT, the EMM PIDs
+    // that the CAT gives for those systems, and the rewritten CAT.
+    std::set<int> m_ecmPids;
+    std::set<int> m_caSystems;
+    std::set<int> m_emmPids;
+    SectionRewriter m_catRewriter;
 
     // The rewritten PAT of per-program carriage.
     QByteArray m_rewrittenPat;          // the section

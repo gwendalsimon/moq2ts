@@ -94,7 +94,26 @@ bool isVideoStreamType(int streamType) {
     }
 }
 
-bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryPids, int* videoPid) {
+// The CA_descriptors (tag 0x09) in the descriptor loop [from, to): their
+// CA_PIDs and CA_system_ids.
+void readCaDescriptors(const QByteArray& section, int from, int to, std::set<int>* caPids, std::set<int>* caSystems) {
+    for (int offset = from; offset + 2 <= to;) {
+        const int tag = static_cast<unsigned char>(section[offset]);
+        const int length = static_cast<unsigned char>(section[offset + 1]);
+        if (tag == 0x09 && length >= 4 && offset + 2 + length <= to) {
+            caSystems->insert((static_cast<unsigned char>(section[offset + 2]) << 8) |
+                              static_cast<unsigned char>(section[offset + 3]));
+            caPids->insert(((static_cast<unsigned char>(section[offset + 4]) & 0x1F) << 8) |
+                           static_cast<unsigned char>(section[offset + 5]));
+        }
+        offset += 2 + length;
+    }
+}
+
+// The PMT fields the packetizer uses. The CA_descriptors of the program loop
+// and of each ES loop give the ECM PIDs and the CA systems in use.
+bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryPids, int* videoPid,
+              std::set<int>* ecmPids, std::set<int>* caSystems) {
     if (section.size() < 16 || static_cast<unsigned char>(section[0]) != 0x02) {
         return false;
     }
@@ -106,11 +125,14 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
     }
 
     elementaryPids->clear();
+    ecmPids->clear();
+    caSystems->clear();
     *videoPid = -1;
     *pcrPid = ((static_cast<unsigned char>(section[8]) & 0x1f) << 8) |
               static_cast<unsigned char>(section[9]);
     const int programInfoLength = ((static_cast<unsigned char>(section[10]) & 0x0f) << 8) |
                                   static_cast<unsigned char>(section[11]);
+    readCaDescriptors(section, 12, std::min(12 + programInfoLength, sectionEnd), ecmPids, caSystems);
     int offset = 12 + programInfoLength;
     while (offset + 5 <= sectionEnd) {
         const int streamType = static_cast<unsigned char>(section[offset]);
@@ -119,6 +141,7 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
         const int esInfoLength = ((static_cast<unsigned char>(section[offset + 3]) & 0x0f) << 8) |
                                  static_cast<unsigned char>(section[offset + 4]);
         elementaryPids->insert(elementaryPid);
+        readCaDescriptors(section, offset + 5, std::min(offset + 5 + esInfoLength, sectionEnd), ecmPids, caSystems);
         if (*videoPid < 0 && isVideoStreamType(streamType)) {
             *videoPid = elementaryPid;
         }
@@ -559,6 +582,52 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
     refreshInitData();
 }
 
+SectionRewriter* M2tsPacketizer::rewriterFor(int pid) {
+    return pid == 0x0001 ? &m_catRewriter : nullptr;
+}
+
+SectionRewriter::Decision M2tsPacketizer::rewriteSection(int pid, const QByteArray& section) {
+    using Decision = SectionRewriter::Decision;
+    if (pid == 0x0001 && static_cast<unsigned char>(section[0]) == 0x01) {
+        return rewriteCat(section);
+    }
+    return Decision{};
+}
+
+SectionRewriter::Decision M2tsPacketizer::rewriteCat(const QByteArray& section) {
+    // Decision C-D1: an EMM stream belongs to a CA system, so the entries of
+    // the carried program are the CA_descriptors of the CA systems that its
+    // ECMs use (draft "Per-Program": SHOULD rewrite the CAT). Other
+    // descriptors stay.
+    const int end = static_cast<int>(section.size()) - 4;
+    QByteArray kept;
+    std::set<int> emmPids;
+    for (int offset = 8; offset + 2 <= end;) {
+        const int tag = static_cast<unsigned char>(section[offset]);
+        const int length = static_cast<unsigned char>(section[offset + 1]);
+        if (offset + 2 + length > end) {
+            break;
+        }
+        std::set<int> pids;
+        std::set<int> systems;
+        readCaDescriptors(section, offset, offset + 2 + length, &pids, &systems);
+        if (tag != 0x09 || (!systems.empty() && m_caSystems.count(*systems.begin()) != 0)) {
+            kept += section.mid(offset, 2 + length);
+            emmPids.insert(pids.begin(), pids.end());
+        }
+        offset += 2 + length;
+    }
+    if (emmPids != m_emmPids) {
+        m_emmPids = emmPids;
+        selectPids();
+    }
+    QByteArray rewritten = section.left(8) + kept + QByteArray(4, char(0));
+    const int sectionLength = static_cast<int>(rewritten.size()) - 3;
+    rewritten[1] = static_cast<char>((static_cast<unsigned char>(rewritten[1]) & 0xF0) | ((sectionLength >> 8) & 0x0F));
+    rewritten[2] = static_cast<char>(sectionLength & 0xFF);
+    return SectionRewriter::Decision{SectionRewriter::Decision::Replace, rewritten};
+}
+
 void M2tsPacketizer::endTrack(const QString& reason) {
     m_ended = true;
     m_endReason = reason;
@@ -574,9 +643,13 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     int pcrPid = -1;
     int videoPid = -1;
     std::set<int> elementaryPids;
-    if (!parsePmt(section.bytes, &pcrPid, &elementaryPids, &videoPid)) {
+    std::set<int> ecmPids;
+    std::set<int> caSystems;
+    if (!parsePmt(section.bytes, &pcrPid, &elementaryPids, &videoPid, &ecmPids, &caSystems)) {
         return;
     }
+    m_ecmPids = ecmPids;
+    m_caSystems = caSystems;
     m_pmt = section;
     m_pcrPid = pcrPid;
     m_videoPid = videoPid;
@@ -709,6 +782,12 @@ void M2tsPacketizer::selectPids() {
         m_selectedPids.insert(m_pcrPid);
     }
     m_selectedPids.insert(m_elementaryPids.begin(), m_elementaryPids.end());
+    // Draft "Per-Program": a publisher filtering a scrambled stream MUST keep
+    // the conditional access packets: the CAT, the ECMs that the PMT
+    // references, and the EMMs that the CAT references.
+    m_selectedPids.insert(0x0001);
+    m_selectedPids.insert(m_ecmPids.begin(), m_ecmPids.end());
+    m_selectedPids.insert(m_emmPids.begin(), m_emmPids.end());
     // Optional SI-table retention (msfts#7 suggestion 1): keep the well-known
     // DVB PSI/SI PIDs (NIT 0x10, SDT/BAT 0x11, EIT 0x12, TDT/TOT 0x14) alongside
     // the selected program.
@@ -789,6 +868,17 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             const bool keepNull = m_retainNullPackets && pid == 0x1FFF;
             if (!selected && !keepNull) {
                 --index;
+                continue;
+            }
+            // Rewritten tables other than the PAT: their sections go out in new
+            // packets, often none, in the place of this one.
+            if (SectionRewriter* rewriter = rewriterFor(pid)) {
+                const QList<QByteArray> rewritten = rewriter->push(
+                    tsView, packet, [this, pid](const QByteArray& section) { return rewriteSection(pid, section); });
+                for (const QByteArray& out : rewritten) {
+                    payload += out;
+                }
+                index += static_cast<int>(rewritten.size()) - 1;
                 continue;
             }
             // One rewritten PAT packet takes the place of the first packet of
