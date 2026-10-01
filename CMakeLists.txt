@@ -427,4 +427,15 @@ if(UNIX AND NOT APPLE)
         target_link_libraries(moq2ts-m2ts-packetizer-tests PRIVATE PkgConfig::LIBAVFORMAT PkgConfig::LIBAVUTIL)
     endif()
     add_test(NAME moq2ts-m2ts-packetizer-tests COMMAND moq2ts-m2ts-packetizer-tests)
+
+    add_executable(moq2ts-psi-assembler-tests
+        tests/psi_assembler_test.cpp
+        src/media/M2tsPacketizer.cpp
+    )
+    target_include_directories(moq2ts-psi-assembler-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-psi-assembler-tests PRIVATE ${CORE_QT_LIBS})
+    if(TARGET PkgConfig::LIBAVFORMAT)
+        target_link_libraries(moq2ts-psi-assembler-tests PRIVATE PkgConfig::LIBAVFORMAT PkgConfig::LIBAVUTIL)
+    endif()
+    add_test(NAME moq2ts-psi-assembler-tests COMMAND moq2ts-psi-assembler-tests)
 endif()
