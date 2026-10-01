@@ -168,6 +168,7 @@ private:
     SectionRewriter* rewriterFor(int pid);
     SectionRewriter::Decision rewriteSection(int pid, const QByteArray& section);
     SectionRewriter::Decision rewriteCat(const QByteArray& section);
+    SectionRewriter::Decision rewriteSdt(const QByteArray& section);
     // Stops the track: readObject returns false with this reason from now on.
     void endTrack(const QString& reason);
     // Per-program carriage: the PAT that lists the selected program only.
@@ -212,6 +213,9 @@ private:
     std::set<int> m_caSystems;
     std::set<int> m_emmPids;
     SectionRewriter m_catRewriter;
+    // With --retain-si: the SDT and the EIT reduced to the carried service.
+    SectionRewriter m_sdtRewriter;
+    SectionRewriter m_eitRewriter;
 
     // The rewritten PAT of per-program carriage.
     QByteArray m_rewrittenPat;          // the section

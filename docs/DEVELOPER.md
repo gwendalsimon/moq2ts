@@ -101,6 +101,9 @@ media publishing. It currently provides:
   - Keeps the conditional access packets of the selected program: the ECM
     PIDs of its PMT CA_descriptors, the CAT rewritten to the CA systems those
     ECMs use, and the EMM PIDs that the CAT gives for them.
+  - With `--retain-si`, reduces the SDT actual to the carried service and
+    keeps only that service's EIT actual sections. SDT other and EIT other
+    go. The NIT, BAT, TDT, and TOT pass unchanged.
   - Follows PAT and PMT changes during the session. A per-program track ends
     when its program leaves the PAT. An unmodified-program track ends when the
     PAT no longer lists its program alone. When the change alters initData,

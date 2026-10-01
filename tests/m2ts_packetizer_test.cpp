@@ -3,6 +3,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QMap>
 #include <QTemporaryDir>
 
 #include <sys/stat.h>
@@ -44,10 +45,11 @@ struct Run {
     QString error;
 };
 
-Run publish(const QString& path, bool transparent, int program = 0) {
+Run publish(const QString& path, bool transparent, int program = 0, bool retainSi = false) {
     Run run;
     M2tsPacketizer packetizer(path);
     packetizer.setTransparent(transparent);
+    packetizer.setRetainSiTables(retainSi);
     if (!packetizer.open(program, &run.error)) {
         return run;
     }
@@ -491,6 +493,63 @@ int main() {
                      "CA: CAT lists only the program's CA system, version 0 on repeat, valid CRC_32");
         ok &= expect(cats.value(2) == tb::catSection(tb::caDescriptor(0x0B00, 0x700) + tb::caDescriptor(0x0B00, 0x703), 1),
                      "CA: the changed CAT moves to version 1");
+    }
+
+    // SI rewrite with --retain-si: the SDT actual keeps the carried service in
+    // one section; SDT other and EIT other go; EIT actual keeps the carried
+    // service's sections unchanged; the BAT and the TDT pass unchanged.
+    {
+        const QByteArray name1("\x48\x03\x01\x00\x00", 5);   // a short service_descriptor
+        const QByteArray sdtActual0 = tb::longSection(0x42, 1, tb::sdtBody(0x22, {{2, {}}, {3, {}}}), 4, 0, 1);
+        const QByteArray sdtActual1 = tb::longSection(0x42, 1, tb::sdtBody(0x22, {{1, name1}}), 4, 1, 1);
+        const QByteArray sdtOther = tb::longSection(0x46, 9, tb::sdtBody(0x22, {{1, {}}}));
+        const QByteArray bat = tb::longSection(0x4A, 0x1234, QByteArray("\xF0\x00\xF0\x00", 4));
+        const QByteArray eitService1 = tb::longSection(0x4E, 1, QByteArray(6, char(0)));
+        const QByteArray eitService2 = tb::longSection(0x4E, 2, QByteArray(6, char(0)));
+        const QByteArray eitSchedule1 = tb::longSection(0x50, 1, QByteArray(6, char(0)));
+        const QByteArray eitOther = tb::longSection(0x4F, 1, QByteArray(6, char(0)));
+        QByteArray tdt("\x70\x70\x05\xE0\x00\x12\x00\x00", 8);   // section without CRC_32
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}, {3, 0x1002}}));
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            int sdtCc = repeat * 4;
+            for (const QByteArray& section : {sdtActual0, sdtActual1, sdtOther, bat}) {
+                ts += tb::psiPacket(0x0011, section, sdtCc++);
+            }
+            int eitCc = repeat * 4;
+            for (const QByteArray& section : {eitService1, eitService2, eitSchedule1, eitOther}) {
+                ts += tb::psiPacket(0x0012, section, eitCc++);
+            }
+            ts += tb::psiPacket(0x0014, tdt, repeat);
+        }
+        const QString path = dir.filePath("si.ts");
+        ok &= expect(writeFile(path, ts), "write SI stream");
+
+        const Run run = publish(path, false, 1, true);
+        QMap<int, QList<QByteArray>> tables;
+        QMap<int, moq2ts::PsiAssembler> assemblers;
+        for (const QByteArray& packet : run.packets) {
+            const int pid = pidOfPacket(packet);
+            if (pid == 0x0011 || pid == 0x0012) {
+                for (const auto& section : assemblers[pid].push(packet, packet)) {
+                    tables[pid].append(section.bytes);
+                }
+            }
+        }
+        const QByteArray sdtExpected = tb::longSection(0x42, 1, tb::sdtBody(0x22, {{1, name1}}), 0, 0, 0);
+        ok &= expect(tables.value(0x0011) == QList<QByteArray>({sdtExpected, bat, sdtExpected, bat}),
+                     "SI: SDT actual reduced to service 1, version 0 on repeat; SDT other dropped; BAT unchanged");
+        ok &= expect(tables.value(0x0012) == QList<QByteArray>({eitService1, eitSchedule1, eitService1, eitSchedule1}),
+                     "SI: EIT actual of service 1 kept unchanged; other services and EIT other dropped");
+        QList<QByteArray> tdtOut;
+        for (const QByteArray& packet : run.packets) {
+            if (pidOfPacket(packet) == 0x0014) {
+                tdtOut.append(packet);
+            }
+        }
+        ok &= expect(tdtOut.size() == 2 && tdtOut.at(0) == ts.mid(ts.indexOf(tb::psiPacket(0x0014, tdt, 0)), 188),
+                     "SI: TDT passes unchanged");
+        ok &= expect(!pids(publish(path, false, 1, false)).contains(0x0011), "SI: without --retain-si, no SI is kept");
     }
 
     // Object media time: the PTS of the first video PES in each Object, on the
