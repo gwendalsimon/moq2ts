@@ -60,7 +60,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--program <n>` | `0` | MPEG program to select (0 = first); ignored with `--unmodified` |
 | `--unmodified` | off | Unmodified carriage: forward every source packet unchanged (no PID filter or rewrite, no initialization data). The track is `unmodified-program` for a single-program source and `unmodified-multiplex` otherwise |
 | `--transparent` | off | Alias of `--unmodified`, kept for existing scripts |
-| `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT) |
+| `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT). The SDT and the EIT keep the carried service only; the NIT, BAT, TDT, and TOT pass unchanged |
 | `--retain-null` | off | Per-program mode: also keep null (0x1FFF) packets |
 | `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s (0 omits the catalog hint). The draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--unmodified` and SRT ingest drop it when the source PAT lists several programs, and warn |
 | `--fragment-ms <ms>` | `250` | Group cadence |

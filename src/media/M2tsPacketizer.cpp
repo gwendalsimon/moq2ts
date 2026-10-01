@@ -583,15 +583,76 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
 }
 
 SectionRewriter* M2tsPacketizer::rewriterFor(int pid) {
-    return pid == 0x0001 ? &m_catRewriter : nullptr;
+    if (pid == 0x0001) {
+        return &m_catRewriter;
+    }
+    // With --retain-si, the SDT and the EIT keep only the carried service
+    // (draft "Per-Program": SHOULD rewrite the SI). The NIT, TDT, and TOT pass
+    // unchanged.
+    if (m_retainSiTables && pid == 0x0011) {
+        return &m_sdtRewriter;
+    }
+    if (m_retainSiTables && pid == 0x0012) {
+        return &m_eitRewriter;
+    }
+    return nullptr;
 }
 
 SectionRewriter::Decision M2tsPacketizer::rewriteSection(int pid, const QByteArray& section) {
     using Decision = SectionRewriter::Decision;
-    if (pid == 0x0001 && static_cast<unsigned char>(section[0]) == 0x01) {
-        return rewriteCat(section);
+    if (section.size() < 12) {
+        return Decision{};   // shorter than any long-form section with a CRC_32
+    }
+    const int tableId = static_cast<unsigned char>(section[0]);
+    if (pid == 0x0001) {
+        return tableId == 0x01 ? rewriteCat(section) : Decision{};
+    }
+    if (pid == 0x0011) {
+        // SDT actual: the carried service only. SDT other describes other
+        // transport streams. The BAT passes unchanged (decision C-D2).
+        if (tableId == 0x42) {
+            return rewriteSdt(section);
+        }
+        return tableId == 0x46 ? Decision{} : Decision{Decision::Keep, {}};
+    }
+    if (pid == 0x0012) {
+        // EIT actual, present/following (0x4E) and schedule (0x50 to 0x5F):
+        // the sections of the carried service, unchanged. EIT other (0x4F,
+        // 0x60 to 0x6F) describes other transport streams.
+        const int serviceId = (static_cast<unsigned char>(section[3]) << 8) | static_cast<unsigned char>(section[4]);
+        if (tableId == 0x4E || (tableId >= 0x50 && tableId <= 0x5F)) {
+            return serviceId == m_programNumber ? Decision{Decision::Keep, {}} : Decision{};
+        }
+        return tableId == 0x4F || (tableId >= 0x60 && tableId <= 0x6F) ? Decision{} : Decision{Decision::Keep, {}};
     }
     return Decision{};
+}
+
+SectionRewriter::Decision M2tsPacketizer::rewriteSdt(const QByteArray& section) {
+    // The service loop starts after original_network_id and a reserved octet.
+    // In DVB, the service_id equals the program_number. The section that holds
+    // the carried service becomes the only section (section_number and
+    // last_section_number 0); the others go.
+    const int end = static_cast<int>(section.size()) - 4;
+    for (int offset = 11; offset + 5 <= end;) {
+        const int serviceId = (static_cast<unsigned char>(section[offset]) << 8) | static_cast<unsigned char>(section[offset + 1]);
+        const int loopLength = ((static_cast<unsigned char>(section[offset + 3]) & 0x0F) << 8) |
+                               static_cast<unsigned char>(section[offset + 4]);
+        if (offset + 5 + loopLength > end) {
+            break;
+        }
+        if (serviceId == m_programNumber) {
+            QByteArray rewritten = section.left(11) + section.mid(offset, 5 + loopLength) + QByteArray(4, char(0));
+            rewritten[6] = char(0x00);   // section_number
+            rewritten[7] = char(0x00);   // last_section_number
+            const int sectionLength = static_cast<int>(rewritten.size()) - 3;
+            rewritten[1] = static_cast<char>((static_cast<unsigned char>(rewritten[1]) & 0xF0) | ((sectionLength >> 8) & 0x0F));
+            rewritten[2] = static_cast<char>(sectionLength & 0xFF);
+            return SectionRewriter::Decision{SectionRewriter::Decision::Replace, rewritten};
+        }
+        offset += 5 + loopLength;
+    }
+    return SectionRewriter::Decision{};
 }
 
 SectionRewriter::Decision M2tsPacketizer::rewriteCat(const QByteArray& section) {
