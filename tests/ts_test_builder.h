@@ -83,6 +83,60 @@ inline QByteArray pmtSection(int programNumber, int pcrPid, const QList<std::pai
     return finishSection(section);
 }
 
+// A CA_descriptor (tag 0x09): CA_system_id and CA_PID.
+inline QByteArray caDescriptor(int caSystemId, int caPid) {
+    QByteArray descriptor;
+    descriptor.append(char(0x09));
+    descriptor.append(char(0x04));
+    appendU16(&descriptor, caSystemId);
+    appendU16(&descriptor, 0xE000 | caPid);
+    return descriptor;
+}
+
+// A PMT with descriptors: programInfo for the program loop, and per stream
+// (stream_type, PID, ES_info descriptors).
+struct PmtStream {
+    int streamType;
+    int pid;
+    QByteArray esInfo;
+};
+
+inline QByteArray pmtSectionWithDescriptors(int programNumber, int pcrPid, const QByteArray& programInfo,
+                                            const QList<PmtStream>& streams, int version = 0) {
+    QByteArray section;
+    section.append(char(0x02));
+    section.append(char(0xB0));
+    section.append(char(0x00));
+    appendU16(&section, programNumber);
+    section.append(static_cast<char>(0xC1 | ((version & 0x1F) << 1)));
+    section.append(char(0x00));
+    section.append(char(0x00));
+    appendU16(&section, 0xE000 | pcrPid);
+    appendU16(&section, 0xF000 | static_cast<int>(programInfo.size()));
+    section.append(programInfo);
+    for (const PmtStream& stream : streams) {
+        section.append(static_cast<char>(stream.streamType));
+        appendU16(&section, 0xE000 | stream.pid);
+        appendU16(&section, 0xF000 | static_cast<int>(stream.esInfo.size()));
+        section.append(stream.esInfo);
+    }
+    return finishSection(section);
+}
+
+// A CAT (table_id 0x01) with the given descriptors.
+inline QByteArray catSection(const QByteArray& descriptors, int version = 0) {
+    QByteArray section;
+    section.append(char(0x01));
+    section.append(char(0xB0));
+    section.append(char(0x00));
+    appendU16(&section, 0xFFFF);         // reserved table_id_extension
+    section.append(static_cast<char>(0xC1 | ((version & 0x1F) << 1)));
+    section.append(char(0x00));
+    section.append(char(0x00));
+    section.append(descriptors);
+    return finishSection(section);
+}
+
 // One TS packet on pid. When adaptation is set, the packet carries an adaptation
 // field with the given flags byte (0x40 = random_access_indicator). The payload
 // is padded with 0xFF stuffing.

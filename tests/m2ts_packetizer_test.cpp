@@ -449,6 +449,50 @@ int main() {
         }
     }
 
+    // Conditional access: a scrambled MPTS with one CA system per program. The
+    // per-program track keeps its ECMs (from the PMT), the CAT, and the EMMs of
+    // its CA system (from the CAT). The CAT lists only that system.
+    {
+        const QByteArray pat = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
+        const QByteArray pmt1 = tb::psiPacket(0x1000, tb::pmtSectionWithDescriptors(
+            1, 0x100, tb::caDescriptor(0x0B00, 0x600), {{0x1B, 0x100, {}}, {0x0F, 0x101, tb::caDescriptor(0x0B00, 0x602)}}));
+        const QByteArray pmt2 = tb::psiPacket(0x1001, tb::pmtSectionWithDescriptors(
+            2, 0x200, tb::caDescriptor(0x0500, 0x601), {{0x1B, 0x200, {}}}));
+        const QByteArray catBytes = tb::catSection(tb::caDescriptor(0x0B00, 0x700) + tb::caDescriptor(0x0500, 0x701));
+        // A later CAT version adds a second EMM stream for the program's CA system.
+        const QByteArray catChanged = tb::catSection(tb::caDescriptor(0x0B00, 0x700) + tb::caDescriptor(0x0500, 0x701) +
+                                                     tb::caDescriptor(0x0B00, 0x703), 1);
+        const auto data = [](int pid, int cc) { return tb::tsPacket(pid, false, QByteArray(184, char(0)), cc); };
+        QByteArray ts = pat + pmt1 + pmt2;
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            ts += tb::psiPacket(0x0001, repeat < 2 ? catBytes : catChanged, repeat);
+            for (int pid : {0x600, 0x601, 0x602, 0x700, 0x701, 0x703, 0x100, 0x200}) {
+                ts += data(pid, repeat);
+            }
+        }
+        const QString path = dir.filePath("scrambled.ts");
+        ok &= expect(writeFile(path, ts), "write scrambled MPTS");
+        const Run run = publish(path, false, 1);
+        const QList<int> out = pids(run);
+        ok &= expect(out.count(0x600) == 3 && out.count(0x602) == 3, "CA: program and ES ECMs kept");
+        ok &= expect(out.count(0x700) == 3, "CA: EMM of the program's CA system kept");
+        ok &= expect(out.count(0x703) == 1, "CA: an EMM PID that a new CAT adds is kept from then on");
+        ok &= expect(!out.contains(0x601) && !out.contains(0x701) && !out.contains(0x200), "CA: other program's CA PIDs dropped");
+        moq2ts::PsiAssembler assembler;
+        QList<QByteArray> cats;
+        for (const QByteArray& packet : run.packets) {
+            if (pidOfPacket(packet) == 0x0001) {
+                for (const auto& section : assembler.push(packet, packet)) {
+                    cats.append(section.bytes);
+                }
+            }
+        }
+        ok &= expect(cats.size() == 3 && cats.at(0) == tb::catSection(tb::caDescriptor(0x0B00, 0x700)) && cats.at(1) == cats.at(0),
+                     "CA: CAT lists only the program's CA system, version 0 on repeat, valid CRC_32");
+        ok &= expect(cats.value(2) == tb::catSection(tb::caDescriptor(0x0B00, 0x700) + tb::caDescriptor(0x0B00, 0x703), 1),
+                     "CA: the changed CAT moves to version 1");
+    }
+
     // Object media time: the PTS of the first video PES in each Object, on the
     // PMT's video PID even when an audio PES comes first and the PCR has its own
     // PID. Two packets per Object.
