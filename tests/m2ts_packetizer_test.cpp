@@ -71,6 +71,27 @@ QList<int> pids(const Run& run) {
     }
     return result;
 }
+// A packet on pid that carries a PCR (27 MHz) in its adaptation field.
+QByteArray pcrPacket(int pid, std::int64_t pcr, int cc) {
+    const std::int64_t base = pcr / 300;
+    const int extension = static_cast<int>(pcr % 300);
+    QByteArray packet;
+    packet.append(char(0x47));
+    packet.append(static_cast<char>((pid >> 8) & 0x1F));
+    packet.append(static_cast<char>(pid & 0xFF));
+    packet.append(static_cast<char>(0x30 | (cc & 0x0F)));
+    packet.append(char(7));                                    // adaptation_field_length
+    packet.append(char(0x10));                                 // PCR_flag
+    packet.append(static_cast<char>((base >> 25) & 0xFF));
+    packet.append(static_cast<char>((base >> 17) & 0xFF));
+    packet.append(static_cast<char>((base >> 9) & 0xFF));
+    packet.append(static_cast<char>((base >> 1) & 0xFF));
+    packet.append(static_cast<char>(((base & 0x01) << 7) | 0x7E | ((extension >> 8) & 0x01)));
+    packet.append(static_cast<char>(extension & 0xFF));
+    packet.append(QByteArray(188 - packet.size(), char(0)));
+    return packet;
+}
+
 // Opens path as a live source: a FIFO that a second thread fills with data.
 struct LiveRun {
     Run run;
@@ -550,6 +571,45 @@ int main() {
         ok &= expect(tdtOut.size() == 2 && tdtOut.at(0) == ts.mid(ts.indexOf(tb::psiPacket(0x0014, tdt, 0)), 188),
                      "SI: TDT passes unchanged");
         ok &= expect(!pids(publish(path, false, 1, false)).contains(0x0011), "SI: without --retain-si, no SI is kept");
+    }
+
+    // Mux rate: a CBR SPTS at 3,008,000 bit/s (2,000 packets per second) with
+    // a PCR every 100 packets gives exactly that rate. One PCR, no null
+    // packets, or an MPTS give no value.
+    {
+        const auto stream = [](const QList<std::pair<int, int>>& programs, int pcrEvery, int nullEvery, int packets) {
+            QByteArray ts = tb::psiPacket(0x0000, tb::patSection(programs));
+            ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+            int videoCc = 0;
+            for (int index = 2; index < packets; ++index) {
+                if (index % pcrEvery == 0) {
+                    ts += pcrPacket(0x100, static_cast<std::int64_t>(index) * 13500, videoCc++);   // 27e6 / 2000
+                } else if (nullEvery > 0 && index % nullEvery == 0) {
+                    ts += tb::tsPacket(0x1FFF, false, QByteArray(184, char(0xFF)));
+                } else {
+                    ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), videoCc++);
+                }
+            }
+            return ts;
+        };
+        const auto measure = [&](const QString& name, const QByteArray& ts, QString* note) {
+            const QString path = dir.filePath(name);
+            writeFile(path, ts);
+            M2tsPacketizer packetizer(path);
+            QString error;
+            packetizer.open(0, &error);
+            *note = packetizer.muxRateNote();
+            return packetizer.measuredMuxRate();
+        };
+        QString note;
+        ok &= expect(measure("cbr.ts", stream({{1, 0x1000}}, 100, 3, 3000), &note) == 3008000 && note.isEmpty(),
+                     "mux rate: CBR SPTS measured exactly");
+        ok &= expect(measure("one-pcr.ts", stream({{1, 0x1000}}, 5000, 3, 3000), &note) == 0 && note.contains("two PCRs"),
+                     "mux rate: one PCR gives no value");
+        ok &= expect(measure("vbr.ts", stream({{1, 0x1000}}, 100, 0, 3000), &note) == 0 && note.contains("VBR"),
+                     "mux rate: no null packets gives no value");
+        ok &= expect(measure("mpts-rate.ts", stream({{1, 0x1000}, {2, 0x1001}}, 100, 3, 3000), &note) == 0,
+                     "mux rate: not measured for an MPTS");
     }
 
     // Object media time: the PTS of the first video PES in each Object, on the
