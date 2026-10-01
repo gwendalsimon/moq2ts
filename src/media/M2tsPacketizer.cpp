@@ -231,6 +231,71 @@ int PsiAssembler::append(const char* data, int size, const QByteArray& sourcePac
     return used;
 }
 
+QList<QByteArray> SectionRewriter::push(const QByteArray& tsPacket, const QByteArray& sourcePacket,
+                                       const Filter& filter) {
+    QList<QByteArray> out;
+    for (const PsiAssembler::Section& section : m_assembler.push(tsPacket, sourcePacket)) {
+        const Decision decision = filter(section.bytes);
+        if (decision.kind == Decision::Keep) {
+            out += packets(section.bytes, tsPacket, sourcePacket);
+        } else if (decision.kind == Decision::Replace) {
+            out += packets(versioned(decision.section), tsPacket, sourcePacket);
+        }
+    }
+    return out;
+}
+
+QByteArray SectionRewriter::versioned(QByteArray section) {
+    // A long-form section: version_number sits in bits 5 to 1 of octet 5, and
+    // the section ends with its CRC_32. section_length must already count the
+    // CRC_32 octets.
+    const int length = 3 + (((static_cast<unsigned char>(section[1]) & 0x0F) << 8) |
+                            static_cast<unsigned char>(section[2]));
+    section.resize(length);   // drops a stale CRC_32 beyond the length, or makes room
+    QByteArray content = section.left(length - 4);
+    content[5] = static_cast<char>(static_cast<unsigned char>(content[5]) & 0xC1);
+    const std::pair<int, int> key{static_cast<unsigned char>(section[0]),
+                                  (static_cast<unsigned char>(section[3]) << 8) | static_cast<unsigned char>(section[4])};
+    auto& [lastContent, version] = m_versions.try_emplace(key, QByteArray(), -1).first->second;
+    if (content != lastContent) {
+        lastContent = content;
+        version = (version + 1) & 0x1F;   // 0 for the first table
+    }
+    section[5] = static_cast<char>((static_cast<unsigned char>(section[5]) & 0xC1) | (version << 1));
+    const std::uint32_t crc = mpegCrc32(section.constData(), length - 4);
+    for (int index = 0; index < 4; ++index) {
+        section[length - 4 + index] = static_cast<char>((crc >> (24 - 8 * index)) & 0xFF);
+    }
+    return section;
+}
+
+QList<QByteArray> SectionRewriter::packets(const QByteArray& section, const QByteArray& tsPacket,
+                                           const QByteArray& sourcePacket) {
+    // Each section starts a packet, with pointer_field 0, and the last packet
+    // ends with 0xFF stuffing. A 192-octet packet keeps the prefix of the
+    // source packet that completed the section.
+    QList<QByteArray> out;
+    const QByteArray prefix = sourcePacket.left(sourcePacket.size() - 188);
+    qsizetype position = 0;
+    while (position < section.size() || out.isEmpty()) {
+        QByteArray packet = prefix;
+        packet.append(char(0x47));
+        packet.append(static_cast<char>((out.isEmpty() ? 0x40 : 0x00) | (static_cast<unsigned char>(tsPacket[1]) & 0x1F)));
+        packet.append(tsPacket[2]);
+        packet.append(static_cast<char>(0x10 | m_continuityCounter));
+        m_continuityCounter = (m_continuityCounter + 1) & 0x0F;
+        if (out.isEmpty()) {
+            packet.append(char(0x00));   // pointer_field
+        }
+        const qsizetype room = prefix.size() + 188 - packet.size();
+        packet.append(section.mid(position, room));
+        position += room;
+        packet.append(QByteArray(prefix.size() + 188 - packet.size(), char(0xFF)));
+        out.append(packet);
+    }
+    return out;
+}
+
 std::int64_t pesPts(const QByteArray& tsPacket) {
     if (!payloadUnitStart(tsPacket)) {
         return -1;
