@@ -7,6 +7,8 @@
 #include <QList>
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <utility>
 
 namespace moq2ts::test {
@@ -88,6 +90,11 @@ inline QByteArray tsPacket(int pid, bool payloadUnitStart, const QByteArray& pay
     packet.append(static_cast<char>((payloadUnitStart ? 0x40 : 0x00) | ((pid >> 8) & 0x1F)));
     packet.append(static_cast<char>(pid & 0xFF));
     const bool adaptation = adaptationFlags >= 0;
+    // Q_ASSERT is compiled out in release builds, so a bad test input aborts here.
+    if (payload.size() > (adaptation ? 182 : 184)) {
+        std::fprintf(stderr, "tsPacket: payload of %lld octets does not fit\n", static_cast<long long>(payload.size()));
+        std::abort();
+    }
     packet.append(static_cast<char>((adaptation ? 0x30 : 0x10) | (continuityCounter & 0x0F)));
     if (adaptation) {
         const int stuffing = 188 - 4 - 2 - payload.size();
@@ -99,7 +106,7 @@ inline QByteArray tsPacket(int pid, bool payloadUnitStart, const QByteArray& pay
         packet.append(payload);
         packet.append(QByteArray(188 - packet.size(), char(0xFF)));
     }
-    return packet.left(188);
+    return packet;
 }
 
 // A PSI packet: pointer_field 0 followed by the section.
