@@ -100,6 +100,10 @@ public:
     // m2tsSiPids: PIDs retained in the filtered track beyond those in the PMT.
     QList<int> retainedSiPids() const;
     QByteArray initData() const;
+    // True once after each PSI change that changes initData during the session,
+    // with the new initData. The catalog then has to carry it (draft "Use of MSF
+    // Initialization Data").
+    bool takeInitDataChange(QByteArray* initData);
     // True when the first Object of every Group contains a random access point,
     // which the catalog then declares as mpeg2tsRandomAccess. Valid after open().
     bool randomAccess() const;
@@ -122,6 +126,7 @@ private:
     // Per-program carriage: the PIDs to keep, and initData.
     bool selectProgramPids(QString* error);
     void selectPids();
+    void refreshInitData();
     // Stops the track: readObject returns false with this reason from now on.
     void endTrack(const QString& reason);
     // Per-program carriage: the PAT that lists the selected program only.
@@ -166,6 +171,7 @@ private:
     int m_openProgramCount = 0;   // PAT programs at open(), which set the mode
     bool m_ended = false;
     QString m_endReason;
+    bool m_initDataChanged = false;
 
     // A live track drops the packets before its first random access point.
     bool m_dropLeadIn = false;

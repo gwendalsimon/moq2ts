@@ -36,9 +36,10 @@ struct PublishedObject {
     // it would mislabel exactly one object per run.
     bool startsGroup = false;
     // True when the producer knows that no later object shares this group, as
-    // for a timeline object, the only object of its group. The publisher then
-    // closes the group at once instead of looking ahead for the next object on
-    // the same track, which comes one group later and would hold back every
+    // for a timeline or a catalog object, each the only object of its group.
+    // The publisher then closes the group at once instead of looking ahead for
+    // the next object on the same track, which comes one group later for the
+    // timeline and may never come for the catalog, and would hold back every
     // object queued behind it.
     bool finalInGroup = false;
 };
