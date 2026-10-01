@@ -7,6 +7,8 @@
 
 #include <bitset>
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <optional>
 #include <set>
 #include <utility>
@@ -64,6 +66,35 @@ private:
 
 // section_number of the section that starts in a 188-octet TS packet, or -1.
 int startingSectionNumber(const QByteArray& tsPacket);
+
+// Rewrites the sections of one PID in per-program carriage (draft
+// "Per-Program"). A filter decides, per section, to drop it, keep it unchanged,
+// or replace it. A replaced section gets its own version_number, which changes
+// only when its content changes, and a new CRC_32. The sections go out in new
+// packets with their own continuity counter, in the place of the source packet
+// that completes each of them.
+class SectionRewriter {
+public:
+    struct Decision {
+        enum Kind { Drop, Keep, Replace };
+        Kind kind = Drop;
+        QByteArray section;   // the new section for Replace, CRC_32 included or not
+    };
+    using Filter = std::function<Decision(const QByteArray& section)>;
+
+    // Feeds one source packet (188 or 192 octets) and its 188-octet TS view.
+    // Returns the packets to publish in its place, often none.
+    QList<QByteArray> push(const QByteArray& tsPacket, const QByteArray& sourcePacket, const Filter& filter);
+
+private:
+    QByteArray versioned(QByteArray section);
+    QList<QByteArray> packets(const QByteArray& section, const QByteArray& tsPacket, const QByteArray& sourcePacket);
+
+    PsiAssembler m_assembler;
+    // (table_id, table_id_extension) -> (content without version and CRC_32, version)
+    std::map<std::pair<int, int>, std::pair<QByteArray, int>> m_versions;
+    int m_continuityCounter = 0;
+};
 
 // PTS of a PES packet that starts in a 188-octet TS packet, in 90 kHz units.
 // Returns -1 when the packet starts no PES packet or the header carries no PTS.
