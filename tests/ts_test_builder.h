@@ -45,13 +45,13 @@ inline QByteArray finishSection(QByteArray section) {
 }
 
 // PAT listing (program_number, PMT PID) pairs.
-inline QByteArray patSection(const QList<std::pair<int, int>>& programs) {
+inline QByteArray patSection(const QList<std::pair<int, int>>& programs, int version = 0) {
     QByteArray section;
     section.append(char(0x00));          // table_id
     section.append(char(0xB0));          // section_syntax_indicator, length filled later
     section.append(char(0x00));
     appendU16(&section, 1);              // transport_stream_id
-    section.append(char(0xC1));          // version 0, current_next_indicator
+    section.append(static_cast<char>(0xC1 | ((version & 0x1F) << 1)));          // version 0, current_next_indicator
     section.append(char(0x00));          // section_number
     section.append(char(0x00));          // last_section_number
     for (const auto& [program, pmtPid] : programs) {
@@ -62,13 +62,14 @@ inline QByteArray patSection(const QList<std::pair<int, int>>& programs) {
 }
 
 // PMT of one program: (stream_type, elementary PID) pairs.
-inline QByteArray pmtSection(int programNumber, int pcrPid, const QList<std::pair<int, int>>& streams) {
+inline QByteArray pmtSection(int programNumber, int pcrPid, const QList<std::pair<int, int>>& streams,
+                             int version = 0) {
     QByteArray section;
     section.append(char(0x02));          // table_id
     section.append(char(0xB0));
     section.append(char(0x00));
     appendU16(&section, programNumber);
-    section.append(char(0xC1));
+    section.append(static_cast<char>(0xC1 | ((version & 0x1F) << 1)));
     section.append(char(0x00));
     section.append(char(0x00));
     appendU16(&section, 0xE000 | pcrPid);

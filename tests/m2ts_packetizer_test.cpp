@@ -35,6 +35,37 @@ QByteArray stream(const QList<std::pair<int, int>>& programs) {
     }
     return ts;
 }
+// Every packet the packetizer publishes, and the error that ends the track.
+struct Run {
+    QList<QByteArray> packets;
+    QString error;
+};
+
+Run publish(const QString& path, bool transparent, int program = 0) {
+    Run run;
+    M2tsPacketizer packetizer(path);
+    packetizer.setTransparent(transparent);
+    if (!packetizer.open(program, &run.error)) {
+        return run;
+    }
+    M2tsObject object;
+    while (packetizer.readObject(1, &object, &run.error)) {
+        run.packets.append(object.payload);
+    }
+    return run;
+}
+
+int pidOfPacket(const QByteArray& packet) {
+    return ((static_cast<unsigned char>(packet[1]) & 0x1F) << 8) | static_cast<unsigned char>(packet[2]);
+}
+
+QList<int> pids(const Run& run) {
+    QList<int> result;
+    for (const QByteArray& packet : run.packets) {
+        result.append(pidOfPacket(packet));
+    }
+    return result;
+}
 }  // namespace
 
 int main() {
@@ -148,6 +179,77 @@ int main() {
             }
             ok &= expect(packetizer.initData().left(188) == patPackets.value(0), label + ": initData starts with the rewritten PAT");
         }
+    }
+
+    // Live PSI tracking: a PMT that adds a PID. The new PID is dropped before
+    // the change and kept after it.
+    {
+        const QByteArray pat = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        const QByteArray audio = tb::tsPacket(0x101, false, QByteArray(184, char(0)));
+        QByteArray ts = pat + tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}, 0)) + video + audio;
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}, {0x0F, 0x101}}, 1), 1) + video + audio;
+        const QString path = dir.filePath("pmt-adds-pid.ts");
+        ok &= expect(writeFile(path, ts), "write PMT change stream");
+        const Run run = publish(path, false);
+        ok &= expect(pids(run) == QList<int>({0x0000, 0x1000, 0x100, 0x1000, 0x100, 0x101}),
+                     "PMT change: the new audio PID is kept after the change only");
+    }
+
+    // Live PSI tracking: the PMT moves to a new PID. The filter follows it, and
+    // the rewritten PAT gets version 1 with the new PMT PID.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}, 0), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1100}}, 1), 1);
+        ts += tb::psiPacket(0x1100, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        const QString path = dir.filePath("pmt-moves.ts");
+        ok &= expect(writeFile(path, ts), "write PMT move stream");
+        const Run run = publish(path, false);
+        ok &= expect(pids(run) == QList<int>({0x0000, 0x1000, 0x100, 0x0000, 0x1100, 0x100}),
+                     "PMT move: the new PMT PID is kept");
+        moq2ts::PsiAssembler assembler;
+        QList<QByteArray> pats;
+        for (const QByteArray& packet : run.packets) {
+            if (pidOfPacket(packet) == 0) {
+                for (const auto& section : assembler.push(packet, packet)) {
+                    pats.append(section.bytes);
+                }
+            }
+        }
+        ok &= expect(pats.size() == 2 && pats.at(0) == tb::patSection({{1, 0x1000}}, 0) &&
+                         pats.at(1) == tb::patSection({{1, 0x1100}}, 1),
+                     "PMT move: rewritten PAT version 0, then 1 with the new PID");
+    }
+
+    // Live PSI tracking: the selected program leaves the PAT, which ends a
+    // per-program track. Nothing after the change is published.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1), 1) + video;
+        const QString path = dir.filePath("program-leaves.ts");
+        ok &= expect(writeFile(path, ts), "write program-leaves stream");
+        const Run run = publish(path, false, 1);
+        ok &= expect(pids(run) == QList<int>({0x0000, 0x1000, 0x100}), "program leaves: nothing after the change");
+        ok &= expect(run.error.contains("left the source PAT"), "program leaves: the track ends with a reason");
+    }
+
+    // Live PSI tracking: an unmodified-program source that becomes an MPTS ends
+    // the track, because its mode is no longer true. A repeated PAT does not.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        const QByteArray pmt = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}, 0), 0) + pmt + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}, 0), 1) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 1), 2) + video;
+        const QString path = dir.filePath("spts-to-mpts.ts");
+        ok &= expect(writeFile(path, ts), "write SPTS-to-MPTS stream");
+        const Run run = publish(path, true);
+        ok &= expect(run.packets.size() == 5, "SPTS to MPTS: the repeated PAT passes, the new one ends the track");
+        ok &= expect(run.error.contains("unmodified-program track ends"), "SPTS to MPTS: the track ends with a reason");
     }
 
     // Object media time: the PTS of the first video PES in each Object, on the
