@@ -221,10 +221,11 @@ void LivePipeline::runLoop() {
             published.startsGroup = startsGroup;
             published.mediaTimeUs = object.mediaTimeUs;
             published.mediaDurationUs = static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
-            // One timeline record per media Group, for its first Object.
-            if (st->timelineGroupId != published.groupId) {
+            // One timeline record per media Group, for its first Object that
+            // starts a video PES, with that PES's PTS (MSF 7.1.1).
+            if (object.ptsUs.has_value() && st->timelineGroupId != published.groupId) {
                 st->pendingTimeline = timelineObject(st.get(), timelineTrackName, published,
-                                                     published.mediaTimeUs, nowUnixUs());
+                                                     *object.ptsUs, nowUnixUs());
             }
             ++st->objects;
             st->bytes += published.payload.size();

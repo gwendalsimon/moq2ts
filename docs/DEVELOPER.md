@@ -296,10 +296,9 @@ with the items being `mediaPresentationTimeMs`, `[groupId, objectId]`, and
 `wallclockMs` (milliseconds since the Unix epoch), each the floor in integral
 milliseconds (MSF Section 7.1.1).
 
-`LivePipeline` adds one record per media Group. On the file and pipe path, the
-record points at the first Object of the Group that starts a video PES, and
-carries that PES's PTS. On the capture path, it points at the first Object of
-the Group and carries the capture media time. The wallclock time is the publish
+`LivePipeline` adds one record per media Group. The record points at the first
+Object of the Group that starts a video PES, and carries that PES's PTS. The
+capture path reads the PTS from its own muxed bytes. The wallclock time is the publish
 time on a live source and `0` on a VOD file.
 
 MSF Section 7.3 makes the first Object of each timeline Group an independent

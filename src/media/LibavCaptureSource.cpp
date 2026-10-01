@@ -268,6 +268,7 @@ struct LibavCaptureSource::Impl {
     // Carries the media time of the last video packet consumed by readObject so
     // an object with no new video bytes reuses the last known media time.
     std::uint64_t lastVideoMediaUs = 0;
+    PtsUnwrapper ptsUnwrapper;
 
 #ifdef MOQ2TS_HAVE_LIBAV_CAPTURE
     struct StreamState {
@@ -783,6 +784,22 @@ struct LibavCaptureSource::Impl {
             offsetMediaUs.pop_front();
         }
         object->mediaTimeUs = lastVideoMediaUs;
+
+        // MSF media timeline (draft-ietf-moq-msf-01 Section 7.1.1): the PTS of
+        // the first video PES that starts in this object, read from the muxed
+        // bytes. mediaTimeUs above is the last video packet before the object
+        // ends, so it can name a later frame. The muxer carries the PCR on the
+        // video PID.
+        object->ptsUs.reset();
+        for (qsizetype offset = 0; pcrPidValue >= 0 && offset + 188 <= object->payload.size(); offset += 188) {
+            const QByteArray packet = QByteArray::fromRawData(object->payload.constData() + offset, 188);
+            const int pid = ((static_cast<unsigned char>(packet[1]) & 0x1f) << 8) | static_cast<unsigned char>(packet[2]);
+            const std::int64_t pts = pid == pcrPidValue ? pesPts(packet) : -1;
+            if (pts >= 0) {
+                object->ptsUs = ptsUnwrapper.unwrap(pts) * 100 / 9;
+                break;
+            }
+        }
 
         // A new group begins when this object starts exactly on a recorded
         // boundary, or for the very first object overall.

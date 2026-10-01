@@ -121,28 +121,6 @@ bool isVideoStreamType(int streamType) {
     }
 }
 
-// PTS of a PES packet that starts in tsPacket, in 90 kHz units. Returns -1 when
-// the packet starts no PES packet or the header carries no PTS.
-std::int64_t pesPts(const QByteArray& tsPacket) {
-    if (!payloadUnitStart(tsPacket)) {
-        return -1;
-    }
-    const int offset = payloadOffset(tsPacket);
-    if (offset < 0 || offset + 14 > tsPacket.size()) {
-        return -1;
-    }
-    const auto byte = [&](int index) { return static_cast<std::int64_t>(static_cast<unsigned char>(tsPacket[offset + index])); };
-    if (byte(0) != 0x00 || byte(1) != 0x00 || byte(2) != 0x01) {
-        return -1;
-    }
-    // '10' marker bits, then PTS_DTS_flags '10' or '11'.
-    if ((byte(6) & 0xC0) != 0x80 || (byte(7) & 0x80) == 0) {
-        return -1;
-    }
-    return (((byte(9) >> 1) & 0x07) << 30) | (byte(10) << 22) | ((byte(11) >> 1) << 15) |
-           (byte(12) << 7) | (byte(13) >> 1);
-}
-
 bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryPids, int* videoPid) {
     if (section.size() < 16 || static_cast<unsigned char>(section[0]) != 0x02) {
         return false;
@@ -175,6 +153,36 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
 }
 
 } // namespace
+
+std::int64_t pesPts(const QByteArray& tsPacket) {
+    if (!payloadUnitStart(tsPacket)) {
+        return -1;
+    }
+    const int offset = payloadOffset(tsPacket);
+    if (offset < 0 || offset + 14 > tsPacket.size()) {
+        return -1;
+    }
+    const auto byte = [&](int index) { return static_cast<std::int64_t>(static_cast<unsigned char>(tsPacket[offset + index])); };
+    if (byte(0) != 0x00 || byte(1) != 0x00 || byte(2) != 0x01) {
+        return -1;
+    }
+    // '10' marker bits, then PTS_DTS_flags '10' or '11'.
+    if ((byte(6) & 0xC0) != 0x80 || (byte(7) & 0x80) == 0) {
+        return -1;
+    }
+    return (((byte(9) >> 1) & 0x07) << 30) | (byte(10) << 22) | ((byte(11) >> 1) << 15) |
+           (byte(12) << 7) | (byte(13) >> 1);
+}
+
+std::uint64_t PtsUnwrapper::unwrap(std::int64_t pts) {
+    // The PTS wraps at 2^33. A step back of more than half that range is a wrap.
+    constexpr std::int64_t kPtsRange = std::int64_t{1} << 33;
+    if (m_lastPts >= 0 && pts + kPtsRange / 2 < m_lastPts) {
+        m_offset += static_cast<std::uint64_t>(kPtsRange);
+    }
+    m_lastPts = pts;
+    return m_offset + static_cast<std::uint64_t>(pts);
+}
 
 M2tsPacketizer::M2tsPacketizer(QString sourcePath)
     : m_sourcePath(std::move(sourcePath)),
@@ -552,7 +560,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         }
         const std::int64_t pts = pesPts(tsView);
         if (pts >= 0) {
-            object->ptsUs = unwrapPts(pts) * 100 / 9;   // 90 kHz to microseconds, floored
+            object->ptsUs = m_ptsUnwrapper.unwrap(pts) * 100 / 9;   // 90 kHz to microseconds, floored
             break;
         }
     }
@@ -563,16 +571,6 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     object->startsGroup = rapDetected;
     ++m_nextObjectId;
     return true;
-}
-
-std::uint64_t M2tsPacketizer::unwrapPts(std::int64_t pts) {
-    // The PTS wraps at 2^33. A step back of more than half that range is a wrap.
-    constexpr std::int64_t kPtsRange = std::int64_t{1} << 33;
-    if (m_lastPts >= 0 && pts + kPtsRange / 2 < m_lastPts) {
-        m_ptsWrapOffset += static_cast<std::uint64_t>(kPtsRange);
-    }
-    m_lastPts = pts;
-    return m_ptsWrapOffset + static_cast<std::uint64_t>(pts);
 }
 
 bool M2tsPacketizer::hasRandomAccessIndicator(const QByteArray& tsPacket) const {

@@ -24,8 +24,22 @@ struct M2tsObject {
     std::uint64_t mediaTimeUs = 0;
     // PTS of the first video PES packet that starts in this object, in
     // microseconds, unwrapped past the 33-bit range. Empty when no video PES
-    // starts in it. Set by the file-source path only.
+    // starts in it.
     std::optional<std::uint64_t> ptsUs;
+};
+
+// PTS of a PES packet that starts in a 188-octet TS packet, in 90 kHz units.
+// Returns -1 when the packet starts no PES packet or the header carries no PTS.
+std::int64_t pesPts(const QByteArray& tsPacket);
+
+// Turns successive 33-bit PTS values into one 64-bit count that does not wrap.
+class PtsUnwrapper {
+public:
+    std::uint64_t unwrap(std::int64_t pts);
+
+private:
+    std::int64_t m_lastPts = -1;
+    std::uint64_t m_offset = 0;
 };
 
 class M2tsPacketizer final {
@@ -69,7 +83,6 @@ private:
     bool packetHasSync(const QByteArray& packet) const;
     QByteArray tsPacketView(const QByteArray& sourcePacket) const;
     bool hasRandomAccessIndicator(const QByteArray& tsPacket) const;
-    std::uint64_t unwrapPts(std::int64_t pts);
 
     QString m_sourcePath;
     QFile m_file;
@@ -81,8 +94,7 @@ private:
     int m_patProgramCount = 0;
     // First video elementary PID of the PMT; the PTS source for Object media time.
     int m_videoPid = -1;
-    std::int64_t m_lastPts = -1;
-    std::uint64_t m_ptsWrapOffset = 0;
+    PtsUnwrapper m_ptsUnwrapper;
     std::set<int> m_selectedPids;
     QByteArray m_initData;
     std::uint64_t m_nextObjectId = 0;
