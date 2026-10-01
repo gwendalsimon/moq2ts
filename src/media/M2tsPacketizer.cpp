@@ -1,6 +1,7 @@
 #include "M2tsPacketizer.h"
 
 #include <algorithm>
+#include <vector>
 
 #ifdef MOQ2TS_HAVE_LIBAV_CAPTURE
 extern "C" {
@@ -66,41 +67,32 @@ bool extractPsiSection(const QByteArray& tsPacket, QByteArray* section) {
     return true;
 }
 
-// Number of programs a PAT section lists, not counting program_number 0 (the
-// network PID). Returns -1 when the section is not a PAT.
-int countPatPrograms(const QByteArray& section) {
-    if (section.size() < 12 || static_cast<unsigned char>(section[0]) != 0x00) {
-        return -1;
-    }
-    const int sectionLength = ((static_cast<unsigned char>(section[1]) & 0x0f) << 8) |
-                              static_cast<unsigned char>(section[2]);
-    const int entriesEnd = 3 + sectionLength - 4;
-    int count = 0;
-    for (int offset = 8; offset + 4 <= entriesEnd; offset += 4) {
-        const int program = (static_cast<unsigned char>(section[offset]) << 8) |
-                            static_cast<unsigned char>(section[offset + 1]);
-        if (program != 0) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-bool findPatProgram(const QByteArray& section, int requestedProgram, int* programNumber, int* pmtPid) {
+// The (program_number, PMT PID) entries of a PAT section, without the network
+// PID entry (program_number 0). Returns false when the section is not a PAT.
+bool parsePat(const QByteArray& section, std::vector<std::pair<int, int>>* programs) {
+    programs->clear();
     if (section.size() < 12 || static_cast<unsigned char>(section[0]) != 0x00) {
         return false;
     }
     const int sectionLength = ((static_cast<unsigned char>(section[1]) & 0x0f) << 8) |
                               static_cast<unsigned char>(section[2]);
-    const int entriesEnd = 3 + sectionLength - 4;
+    const int entriesEnd = std::min<int>(3 + sectionLength - 4, section.size());
     for (int offset = 8; offset + 4 <= entriesEnd; offset += 4) {
         const int program = (static_cast<unsigned char>(section[offset]) << 8) |
                             static_cast<unsigned char>(section[offset + 1]);
         const int pid = ((static_cast<unsigned char>(section[offset + 2]) & 0x1f) << 8) |
                         static_cast<unsigned char>(section[offset + 3]);
-        if (program == 0) {
-            continue;
+        if (program != 0) {
+            programs->emplace_back(program, pid);
         }
+    }
+    return true;
+}
+
+// The requested program of a PAT, or its first program when requestedProgram is 0.
+bool findPatProgram(const std::vector<std::pair<int, int>>& programs, int requestedProgram,
+                    int* programNumber, int* pmtPid) {
+    for (const auto& [program, pid] : programs) {
         if (requestedProgram == 0 || requestedProgram == program) {
             *programNumber = program;
             *pmtPid = pid;
@@ -317,10 +309,11 @@ bool M2tsPacketizer::collectInitData(QString* error) {
         const int pid = pidOf(tsPacket);
         if (pid == 0 && patPacket.isEmpty()) {
             QByteArray patSection;
-            if (extractPsiSection(tsPacket, &patSection) &&
-                findPatProgram(patSection, m_requestedProgramNumber, &m_programNumber, &m_pmtPid)) {
+            std::vector<std::pair<int, int>> programs;
+            if (extractPsiSection(tsPacket, &patSection) && parsePat(patSection, &programs) &&
+                findPatProgram(programs, m_requestedProgramNumber, &m_programNumber, &m_pmtPid)) {
                 patPacket = sourcePacket;
-                m_patProgramCount = countPatPrograms(patSection);
+                m_patProgramCount = static_cast<int>(programs.size());
             }
         } else if (m_pmtPid >= 0 && pid == m_pmtPid && pmtPacket.isEmpty()) {
             QByteArray pmtSection;
@@ -420,11 +413,12 @@ bool M2tsPacketizer::identifyVideoPid(QString* error) {
         const int pid = pidOf(tsPacket);
         if (pid == 0 && pmtPid < 0) {
             QByteArray patSection;
-            if (extractPsiSection(tsPacket, &patSection)) {
-                m_patProgramCount = std::max(0, countPatPrograms(patSection));
+            std::vector<std::pair<int, int>> programs;
+            if (extractPsiSection(tsPacket, &patSection) && parsePat(patSection, &programs)) {
+                m_patProgramCount = static_cast<int>(programs.size());
                 // A single-program source has only one program to describe, so
                 // the requested number does not apply to it.
-                findPatProgram(patSection, m_patProgramCount == 1 ? 0 : m_requestedProgramNumber,
+                findPatProgram(programs, m_patProgramCount == 1 ? 0 : m_requestedProgramNumber,
                                &programNumber, &pmtPid);
             }
         } else if (pmtPid >= 0 && pid == pmtPid && pcrPid < 0) {
@@ -506,22 +500,33 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         return false;
     }
 
-    // MSFTS Section 6.3 Group Numbering: start a new group at random access points
-    // (IDR boundaries). Scan packets in this object for the random_access_indicator
-    // in the adaptation field. The video (PCR) PID is identified from PAT/PMT at
-    // open() time; if that scan failed (e.g. sequential source), fall back to
-    // latching onto the first PID where RAI is observed at runtime.
+    // One pass over the Object, without copying packets, finds two things:
+    // - MSFTS Group numbering: a new group starts at a random access point. The
+    //   video (PCR) PID is identified from PAT/PMT at open() time; if that scan
+    //   failed (e.g. sequential source), the scan latches onto the first PID
+    //   where the random_access_indicator is observed.
+    // - MSF media timeline (draft-ietf-moq-msf-01 Section 7.1.1): the media time
+    //   of an Object is the PTS of its first media sample, taken from the first
+    //   video PES that starts in it, on the PMT's video PID or the PCR PID.
     bool rapDetected = false;
+    object->ptsUs.reset();
     const int ps = m_packetSize;
-    for (int offset = 0; offset < payload.size(); offset += ps) {
-        const QByteArray sourcePacket = payload.mid(offset, ps);
-        const QByteArray tsView = tsPacketView(sourcePacket);
-        const int pid = pidOf(tsView);
-        // Skip PSI (PAT=0x0000, CAT=0x0001) and null (0x1FFF)
-        if (pid <= 0x001F || pid == 0x1FFF) {
-            continue;
+    const int tsOffset = ps == 192 ? 4 : 0;
+    const int ptsPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
+    for (qsizetype offset = 0; offset + ps <= payload.size(); offset += ps) {
+        if (rapDetected && (object->ptsUs.has_value() || ptsPid < 0)) {
+            break;
         }
-        if (!hasRandomAccessIndicator(tsView)) {
+        const QByteArray tsView = QByteArray::fromRawData(payload.constData() + offset + tsOffset, 188);
+        const int pid = pidOf(tsView);
+        if (!object->ptsUs.has_value() && pid == ptsPid) {
+            const std::int64_t pts = pesPts(tsView);
+            if (pts >= 0) {
+                object->ptsUs = m_ptsUnwrapper.unwrap(pts) * 100 / 9;   // 90 kHz to microseconds, floored
+            }
+        }
+        // Skip PSI (PAT=0x0000, CAT=0x0001) and null (0x1FFF)
+        if (rapDetected || pid <= 0x001F || pid == 0x1FFF || !hasRandomAccessIndicator(tsView)) {
             continue;
         }
         // Use the known RAP PID if already identified from PAT/PMT or prior latch.
@@ -532,10 +537,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         if (m_rapPid < 0) {
             m_rapPid = pid; // fallback: latch on first RAI PID seen
         }
-        if (pid == m_rapPid) {
-            rapDetected = true;
-            break;
-        }
+        rapDetected = pid == m_rapPid;
     }
 
     if (rapDetected && m_sawFirstRap) {
@@ -545,24 +547,6 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     }
     if (rapDetected) {
         m_sawFirstRap = true;
-    }
-
-    // MSF media timeline (draft-ietf-moq-msf-01 Section 7.1.1): the media time
-    // of an Object is the PTS of its first media sample. Take the first video
-    // PES that starts in this Object, on the PMT's video PID or, failing that,
-    // the PCR PID.
-    object->ptsUs.reset();
-    const int ptsPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
-    for (int offset = 0; ptsPid >= 0 && offset < payload.size(); offset += ps) {
-        const QByteArray tsView = tsPacketView(payload.mid(offset, ps));
-        if (pidOf(tsView) != ptsPid) {
-            continue;
-        }
-        const std::int64_t pts = pesPts(tsView);
-        if (pts >= 0) {
-            object->ptsUs = m_ptsUnwrapper.unwrap(pts) * 100 / 9;   // 90 kHz to microseconds, floored
-            break;
-        }
     }
 
     object->payload = std::move(payload);
