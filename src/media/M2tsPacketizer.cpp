@@ -321,6 +321,12 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     if (m_pcrPid >= 0) {
         m_rapPid = m_pcrPid;
     }
+    // readObject reads the PSI again from the start, so the assemblers restart.
+    // The stored tables stay, so the same tables count as repeats.
+    m_patAssembler.reset();
+    m_pmtAssembler.reset();
+    m_openProgramCount = m_patProgramCount;
+    m_opened = true;
     // Non-seekable sources cannot rewind; the prebuffer (or the peeked bytes) is
     // replayed forward-only by readObject.
     return m_sequential ? true : m_file.seek(0);
@@ -435,12 +441,48 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
     m_patPrograms = programs;
     m_networkPid = networkPid;
     m_patProgramCount = static_cast<int>(programs.size());
-    if (m_pmtPid < 0) {
-        // A single-program source has only one program to describe, so the
-        // requested number does not apply to it in unmodified carriage.
-        const int requested = m_transparent && m_patProgramCount == 1 ? 0 : m_requestedProgramNumber;
-        findPatProgram(programs, requested, &m_programNumber, &m_pmtPid);
+    if (!m_opened) {
+        if (m_pmtPid < 0) {
+            // A single-program source has only one program to describe, so the
+            // requested number does not apply to it in unmodified carriage.
+            const int requested = m_transparent && m_patProgramCount == 1 ? 0 : m_requestedProgramNumber;
+            findPatProgram(programs, requested, &m_programNumber, &m_pmtPid);
+        }
+        return;
     }
+
+    // A PAT change during the session.
+    int programNumber = 0;
+    int pmtPid = -1;
+    const bool listed = findPatProgram(programs, m_programNumber, &programNumber, &pmtPid);
+    if (m_transparent && m_openProgramCount == 1 && (m_patProgramCount != 1 || !listed)) {
+        // The catalog declares unmodified-program with this program number. A
+        // new number needs a new track (draft "Catalog"), which moq2ts cannot
+        // add during a session, and two programs make the mode false.
+        endTrack(QStringLiteral("The source PAT no longer lists program %1 alone; the "
+                                "unmodified-program track ends.").arg(m_programNumber));
+        return;
+    }
+    if (!m_transparent && !listed) {
+        // Draft "Per-Program": the publisher SHOULD end the track.
+        endTrack(QStringLiteral("Program %1 left the source PAT; the track ends.").arg(m_programNumber));
+        return;
+    }
+    if (listed && pmtPid != m_pmtPid) {
+        qWarning("Program %d moved its PMT from PID %d to PID %d.", m_programNumber, m_pmtPid, pmtPid);
+        m_pmtPid = pmtPid;
+        m_pmtAssembler.reset();
+        m_pmt = {};
+    }
+    if (!m_transparent) {
+        rewritePat();
+        selectPids();
+    }
+}
+
+void M2tsPacketizer::endTrack(const QString& reason) {
+    m_ended = true;
+    m_endReason = reason;
 }
 
 void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
@@ -460,6 +502,19 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     m_pcrPid = pcrPid;
     m_videoPid = videoPid;
     m_elementaryPids = elementaryPids;
+    if (!m_opened) {
+        return;
+    }
+    // A PMT change during the session. The catalog and its initData keep the
+    // values from the start: the draft lets the PSI in the packets take
+    // precedence for the advisory fields.
+    qWarning("The PMT of program %d changed; the track follows it.", m_programNumber);
+    if (m_pcrPid >= 0) {
+        m_rapPid = m_pcrPid;
+    }
+    if (!m_transparent) {
+        selectPids();
+    }
 }
 
 void M2tsPacketizer::rewritePat() {
@@ -526,6 +581,17 @@ bool M2tsPacketizer::selectProgramPids(QString* error) {
         m_initData += packet;
     }
 
+    if (m_elementaryPids.empty()) {
+        if (error) {
+            *error = QStringLiteral("Failed to parse selected program PMT elementary PIDs.");
+        }
+        return false;
+    }
+    selectPids();
+    return true;
+}
+
+void M2tsPacketizer::selectPids() {
     m_selectedPids.clear();
     m_selectedPids.insert(0x0000);
     m_selectedPids.insert(m_pmtPid);
@@ -533,17 +599,9 @@ bool M2tsPacketizer::selectProgramPids(QString* error) {
         m_selectedPids.insert(m_pcrPid);
     }
     m_selectedPids.insert(m_elementaryPids.begin(), m_elementaryPids.end());
-    if (m_selectedPids.size() <= 2) {
-        if (error) {
-            *error = QStringLiteral("Failed to parse selected program PMT elementary PIDs.");
-        }
-        return false;
-    }
-
-    // Optional SI-table retention (msfts#7 suggestion 1). Added after the
-    // elementary-PID sanity check above so it cannot mask an unparsed PMT: keep
-    // the well-known DVB PSI/SI PIDs (NIT 0x10, SDT/BAT 0x11, EIT 0x12,
-    // TDT/TOT 0x14) alongside the selected program.
+    // Optional SI-table retention (msfts#7 suggestion 1): keep the well-known
+    // DVB PSI/SI PIDs (NIT 0x10, SDT/BAT 0x11, EIT 0x12, TDT/TOT 0x14) alongside
+    // the selected program.
     if (m_retainSiTables) {
         m_retainedSiPids.clear();
         for (int siPid : {0x0010, 0x0011, 0x0012, 0x0014}) {
@@ -551,13 +609,19 @@ bool M2tsPacketizer::selectProgramPids(QString* error) {
             m_retainedSiPids.append(siPid);
         }
     }
-    return true;
 }
 
 bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QString* error) {
     if (object == nullptr || m_packetSize <= 0) {
         if (error) {
             *error = QStringLiteral("Packetizer is not open.");
+        }
+        return false;
+    }
+
+    if (m_ended) {
+        if (error) {
+            *error = m_endReason;
         }
         return false;
     }
@@ -591,10 +655,19 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             }
             return false;
         }
+        // Live PSI tracking, in every mode: the PAT and the PMT of the selected
+        // program update the filter, or end the track. The packet that ends the
+        // track is not published.
+        const QByteArray tsView = tsPacketView(packet);
+        const int pid = pidOf(tsView);
+        if (pid == 0x0000 || pid == m_pmtPid) {
+            handlePsiPacket(tsView, packet);
+            if (m_ended) {
+                break;
+            }
+        }
         // Transparent mode emits every synced packet verbatim (no PID filtering).
         if (!m_transparent) {
-            const QByteArray tsView = tsPacketView(packet);
-            const int pid = pidOf(tsView);
             const bool selected = m_selectedPids.find(pid) != m_selectedPids.end();
             const bool keepNull = m_retainNullPackets && pid == 0x1FFF;
             if (!selected && !keepNull) {
@@ -618,6 +691,9 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     }
 
     if (payload.isEmpty()) {
+        if (m_ended && error) {
+            *error = m_endReason;
+        }
         return false;
     }
 

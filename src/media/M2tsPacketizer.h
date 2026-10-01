@@ -118,6 +118,9 @@ private:
     void onPmt(const PsiAssembler::Section& section);
     // Per-program carriage: the PIDs to keep, and initData.
     bool selectProgramPids(QString* error);
+    void selectPids();
+    // Stops the track: readObject returns false with this reason from now on.
+    void endTrack(const QString& reason);
     // Per-program carriage: the PAT that lists the selected program only.
     void rewritePat();
     QByteArray rewrittenPatPacket(const QByteArray& sourcePacket, int continuityCounter) const;
@@ -152,6 +155,12 @@ private:
     QByteArray m_rewrittenPatContent;   // transport_stream_id and entries
     int m_rewrittenPatVersion = -1;
     int m_patContinuityCounter = 0;
+
+    // Live PSI tracking.
+    bool m_opened = false;        // open() is done; PSI changes now apply
+    int m_openProgramCount = 0;   // PAT programs at open(), which set the mode
+    bool m_ended = false;
+    QString m_endReason;
     std::set<int> m_selectedPids;
     QByteArray m_initData;
     std::uint64_t m_nextObjectId = 0;

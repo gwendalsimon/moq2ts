@@ -97,7 +97,11 @@ media publishing. It currently provides:
   - Scans the initial packet window for PAT and PMT packets, preserves those
     packets in source-packet form, and exposes them for catalog `initData`.
   - Filters MPTS inputs down to the selected program's PSI/PCR/elementary PIDs
-    before objectization.
+    before objectization, with a PAT rewritten to list that program only.
+  - Follows PAT and PMT changes during the session. A per-program track ends
+    when its program leaves the PAT. An unmodified-program track ends when the
+    PAT no longer lists its program alone. The catalog keeps the values from
+    the start.
 
 - `src/media/LibavCaptureSource.*`
   - Optional direct libavdevice capture path.
