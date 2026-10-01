@@ -44,6 +44,7 @@ PublishedObject timelineObject(PublishState* st,
     timeline.payload = '[' + st->timelineRecords + ']';
     timeline.groupId = media.groupId;
     timeline.objectId = 0;
+    timeline.finalInGroup = true;
     timeline.mediaTimeUs = media.mediaTimeUs;
     timeline.mediaDurationUs = 0;
     return timeline;

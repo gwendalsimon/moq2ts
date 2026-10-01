@@ -223,7 +223,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             // closes its group.
             bool isFinalInGroup = true;
             std::size_t scan = 0;
-            for (;;) {
+            while (!current.finalInGroup) {
                 if (scan < lookahead.size()) {
                     if (lookahead[scan].trackName == current.trackName) {
                         isFinalInGroup = lookahead[scan].groupId != current.groupId;
