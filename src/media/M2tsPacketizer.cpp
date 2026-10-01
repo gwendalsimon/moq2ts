@@ -319,6 +319,20 @@ QList<QByteArray> SectionRewriter::packets(const QByteArray& section, const QByt
     return out;
 }
 
+std::int64_t pcrOf(const QByteArray& tsPacket) {
+    // adaptation_field_control 2 or 3, adaptation_field_length of at least 7,
+    // and PCR_flag (0x10): program_clock_reference_base (33 bits) and _extension
+    // (9 bits).
+    if (tsPacket.size() < 12 || ((static_cast<unsigned char>(tsPacket[3]) >> 4) & 0x02) == 0 ||
+        static_cast<unsigned char>(tsPacket[4]) < 7 || (static_cast<unsigned char>(tsPacket[5]) & 0x10) == 0) {
+        return -1;
+    }
+    const auto byte = [&](int index) { return static_cast<std::int64_t>(static_cast<unsigned char>(tsPacket[index])); };
+    const std::int64_t base = (byte(6) << 25) | (byte(7) << 17) | (byte(8) << 9) | (byte(9) << 1) | (byte(10) >> 7);
+    const std::int64_t extension = ((byte(10) & 0x01) << 8) | byte(11);
+    return base * 300 + extension;
+}
+
 std::int64_t pesPts(const QByteArray& tsPacket) {
     if (!payloadUnitStart(tsPacket)) {
         return -1;
@@ -398,6 +412,12 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     if (!m_transparent) {
         if (!psiFound || !selectProgramPids(error)) {
             return false;
+        }
+        // Draft "Mux Rate": a publisher that removes null packets SHOULD
+        // declare the rate; for a single-program source it is the nominal mux
+        // rate of the source, which the PCR gives.
+        if (!m_retainNullPackets && m_patProgramCount == 1) {
+            measureMuxRate();
         }
     } else if (!psiFound) {
         // Non-fatal for unmodified carriage: without the PCR PID, the group
@@ -1020,6 +1040,81 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     object->startsGroup = rapDetected;
     ++m_nextObjectId;
     return true;
+}
+
+void M2tsPacketizer::measureMuxRate() {
+    // Counts the 188-octet packets between the first PCR and the last PCR read,
+    // over at most 20,000 packets or 1 second of PCR time, and divides by the
+    // PCR interval. A non-seekable source keeps the packets read in the
+    // prebuffer, so readObject still sees them.
+    constexpr int maxPackets = 20000;
+    constexpr std::int64_t pcrHz = 27000000;
+    constexpr std::int64_t pcrRange = (std::int64_t{1} << 33) * 300;
+    m_muxRateNote.clear();
+    if (m_pcrPid < 0) {
+        m_muxRateNote = QStringLiteral("the PMT gives no PCR PID");
+        return;
+    }
+    if (!m_sequential && !m_file.seek(0)) {
+        return;
+    }
+    std::int64_t firstPcr = -1;
+    std::int64_t lastPcr = -1;
+    std::int64_t elapsed = 0;
+    int firstIndex = 0;
+    int lastIndex = 0;
+    int nullPackets = 0;
+    qsizetype bufferOffset = 0;
+    for (int index = 0; index < maxPackets && elapsed < pcrHz; ++index) {
+        QByteArray packet;
+        if (m_sequential && bufferOffset < m_prebuffer.size()) {
+            packet = m_prebuffer.mid(bufferOffset, m_packetSize);
+        } else {
+            packet = m_file.read(m_packetSize);
+            if (m_sequential && packet.size() == m_packetSize) {
+                m_prebuffer += packet;
+            }
+        }
+        bufferOffset += m_packetSize;
+        if (packet.size() != m_packetSize || !packetHasSync(packet)) {
+            break;
+        }
+        const QByteArray tsPacket = tsPacketView(packet);
+        const int pid = pidOf(tsPacket);
+        nullPackets += pid == 0x1FFF ? 1 : 0;
+        const std::int64_t pcr = pid == m_pcrPid ? pcrOf(tsPacket) : -1;
+        if (pcr < 0) {
+            continue;
+        }
+        if (firstPcr < 0) {
+            firstPcr = pcr;
+            firstIndex = index;
+        } else {
+            elapsed += (pcr - lastPcr + pcrRange) % pcrRange;
+        }
+        lastPcr = pcr;
+        lastIndex = index;
+    }
+    if (!m_sequential) {
+        m_file.seek(0);
+    }
+    if (elapsed <= 0 || lastIndex <= firstIndex) {
+        m_muxRateNote = QStringLiteral("fewer than two PCRs at the start of the source");
+    } else if (nullPackets == 0) {
+        // Decision C-D3: without null stuffing the source is likely VBR, and the
+        // measure would be an average, not a nominal rate.
+        m_muxRateNote = QStringLiteral("the source carries no null packets, so it is likely VBR");
+    } else {
+        m_measuredMuxRate = (static_cast<std::int64_t>(lastIndex - firstIndex) * 188 * 8 * pcrHz + elapsed / 2) / elapsed;
+    }
+}
+
+qint64 M2tsPacketizer::measuredMuxRate() const {
+    return m_measuredMuxRate;
+}
+
+QString M2tsPacketizer::muxRateNote() const {
+    return m_muxRateNote;
 }
 
 bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {

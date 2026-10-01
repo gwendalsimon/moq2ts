@@ -91,6 +91,9 @@ private:
     int m_continuityCounter = 0;
 };
 
+// PCR of a 188-octet TS packet in 27 MHz units, or -1 when it carries none.
+std::int64_t pcrOf(const QByteArray& tsPacket);
+
 // PTS of a PES packet that starts in a 188-octet TS packet, in 90 kHz units.
 // Returns -1 when the packet starts no PES packet or the header carries no PTS.
 std::int64_t pesPts(const QByteArray& tsPacket);
@@ -135,6 +138,11 @@ public:
     // with the new initData. The catalog then has to carry it (draft "Use of MSF
     // Initialization Data").
     bool takeInitDataChange(QByteArray* initData);
+    // Per-program carriage of a single-program source without null packets:
+    // the source mux rate in bit/s that the PCR gives, or 0 with the reason in
+    // muxRateNote(). Valid after open().
+    qint64 measuredMuxRate() const;
+    QString muxRateNote() const;
     // True when the first Object of every Group contains a random access point,
     // which the catalog then declares as mpeg2tsRandomAccess. Valid after open().
     bool randomAccess() const;
@@ -158,6 +166,7 @@ private:
     bool selectProgramPids(QString* error);
     void selectPids();
     void refreshInitData();
+    void measureMuxRate();
     // Per-program carriage: the rewriter of a table PID other than the PAT,
     // or nullptr, and the decision for each of its sections.
     SectionRewriter* rewriterFor(int pid);
@@ -218,6 +227,8 @@ private:
     bool m_ended = false;
     QString m_endReason;
     bool m_initDataChanged = false;
+    qint64 m_measuredMuxRate = 0;
+    QString m_muxRateNote;
 
     // A live track drops the packets before its first random access point.
     bool m_dropLeadIn = false;

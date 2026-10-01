@@ -62,7 +62,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--transparent` | off | Alias of `--unmodified`, kept for existing scripts |
 | `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT). The SDT and the EIT keep the carried service only; the NIT, BAT, TDT, and TOT pass unchanged |
 | `--retain-null` | off | Per-program mode: also keep null (0x1FFF) packets |
-| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s (0 omits the catalog hint). The draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--unmodified` and SRT ingest drop it when the source PAT lists several programs, and warn |
+| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s. With 0, a per-program track of a single-program source without `--retain-null` measures the rate from the PCR when the source carries null packets, and a warning says when no rate is declared. The draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--unmodified` and SRT ingest drop it when the source PAT lists several programs, and warn |
 | `--fragment-ms <ms>` | `250` | Group cadence |
 | `--segment-bytes <n>` | `65536` | Target object size |
 | `--draft <n>` | `16` | MOQ draft version (14 or 16) |
