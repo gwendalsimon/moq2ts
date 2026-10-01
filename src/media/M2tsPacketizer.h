@@ -118,6 +118,9 @@ private:
     void onPmt(const PsiAssembler::Section& section);
     // Per-program carriage: the PIDs to keep, and initData.
     bool selectProgramPids(QString* error);
+    // Per-program carriage: the PAT that lists the selected program only.
+    void rewritePat();
+    QByteArray rewrittenPatPacket(const QByteArray& sourcePacket, int continuityCounter) const;
     bool packetHasSync(const QByteArray& packet) const;
     QByteArray tsPacketView(const QByteArray& sourcePacket) const;
     bool hasRandomAccessIndicator(const QByteArray& tsPacket) const;
@@ -141,7 +144,14 @@ private:
     PsiAssembler::Section m_pat;
     PsiAssembler::Section m_pmt;
     std::vector<std::pair<int, int>> m_patPrograms;
+    int m_networkPid = -1;
     std::set<int> m_elementaryPids;
+
+    // The rewritten PAT of per-program carriage.
+    QByteArray m_rewrittenPat;          // the section
+    QByteArray m_rewrittenPatContent;   // transport_stream_id and entries
+    int m_rewrittenPatVersion = -1;
+    int m_patContinuityCounter = 0;
     std::set<int> m_selectedPids;
     QByteArray m_initData;
     std::uint64_t m_nextObjectId = 0;

@@ -44,10 +44,12 @@ int payloadOffset(const QByteArray& tsPacket) {
     return offset < tsPacket.size() ? offset : -1;
 }
 
-// The (program_number, PMT PID) entries of a PAT section, without the network
-// PID entry (program_number 0). Returns false when the section is not a PAT.
-bool parsePat(const QByteArray& section, std::vector<std::pair<int, int>>* programs) {
+// The (program_number, PMT PID) entries of a PAT section, and apart from them
+// the network PID (program_number 0), -1 when absent. Returns false when the
+// section is not a PAT.
+bool parsePat(const QByteArray& section, std::vector<std::pair<int, int>>* programs, int* networkPid) {
     programs->clear();
+    *networkPid = -1;
     if (section.size() < 12 || static_cast<unsigned char>(section[0]) != 0x00) {
         return false;
     }
@@ -61,6 +63,8 @@ bool parsePat(const QByteArray& section, std::vector<std::pair<int, int>>* progr
                         static_cast<unsigned char>(section[offset + 3]);
         if (program != 0) {
             programs->emplace_back(program, pid);
+        } else {
+            *networkPid = pid;
         }
     }
     return true;
@@ -423,11 +427,13 @@ void M2tsPacketizer::handlePsiPacket(const QByteArray& tsPacket, const QByteArra
 
 void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
     std::vector<std::pair<int, int>> programs;
-    if (section.bytes == m_pat.bytes || !parsePat(section.bytes, &programs)) {
+    int networkPid = -1;
+    if (section.bytes == m_pat.bytes || !parsePat(section.bytes, &programs, &networkPid)) {
         return;   // a repeat, or not a PAT
     }
     m_pat = section;
     m_patPrograms = programs;
+    m_networkPid = networkPid;
     m_patProgramCount = static_cast<int>(programs.size());
     if (m_pmtPid < 0) {
         // A single-program source has only one program to describe, so the
@@ -456,13 +462,66 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     m_elementaryPids = elementaryPids;
 }
 
-bool M2tsPacketizer::selectProgramPids(QString* error) {
-    // initData carries every packet of the PAT and of the PMT, including a
-    // table that spans several packets.
-    m_initData.clear();
-    for (const QByteArray& packet : m_pat.sourcePackets) {
-        m_initData += packet;
+void M2tsPacketizer::rewritePat() {
+    // Draft "Per-Program": the PAT lists only the program present in this
+    // track. The network PID entry stays only with --retain-si, which keeps the
+    // NIT. The version_number is set independently of the source, and changes
+    // only when the content of the rewritten table changes.
+    QByteArray entries;
+    const auto appendEntry = [&entries](int program, int pid) {
+        entries.append(static_cast<char>((program >> 8) & 0xFF));
+        entries.append(static_cast<char>(program & 0xFF));
+        entries.append(static_cast<char>(0xE0 | ((pid >> 8) & 0x1F)));
+        entries.append(static_cast<char>(pid & 0xFF));
+    };
+    if (m_retainSiTables && m_networkPid >= 0) {
+        appendEntry(0, m_networkPid);
     }
+    appendEntry(m_programNumber, m_pmtPid);
+    const QByteArray content = m_pat.bytes.mid(3, 2) + entries;   // transport_stream_id and entries
+    if (content == m_rewrittenPatContent) {
+        return;
+    }
+    m_rewrittenPatContent = content;
+    m_rewrittenPatVersion = (m_rewrittenPatVersion + 1) & 0x1F;   // 0 for the first table
+
+    QByteArray section;
+    section.append(char(0x00));                                   // table_id
+    const int sectionLength = 5 + static_cast<int>(entries.size()) + 4;
+    section.append(static_cast<char>(0xB0 | ((sectionLength >> 8) & 0x0F)));
+    section.append(static_cast<char>(sectionLength & 0xFF));
+    section.append(content.left(2));
+    section.append(static_cast<char>(0xC1 | (m_rewrittenPatVersion << 1)));   // current_next_indicator 1
+    section.append(char(0x00));                                   // section_number
+    section.append(char(0x00));                                   // last_section_number
+    section.append(entries);
+    const std::uint32_t crc = mpegCrc32(section.constData(), section.size());
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        section.append(static_cast<char>((crc >> shift) & 0xFF));
+    }
+    m_rewrittenPat = section;
+}
+
+QByteArray M2tsPacketizer::rewrittenPatPacket(const QByteArray& sourcePacket, int continuityCounter) const {
+    QByteArray packet;
+    if (m_packetSize == 192) {
+        packet += sourcePacket.left(4);   // the prefix of the packet it replaces
+    }
+    packet.append(char(0x47));
+    packet.append(char(0x40));                                    // payload_unit_start_indicator, PID 0
+    packet.append(char(0x00));
+    packet.append(static_cast<char>(0x10 | (continuityCounter & 0x0F)));   // payload only
+    packet.append(char(0x00));                                    // pointer_field
+    packet.append(m_rewrittenPat);
+    packet.append(QByteArray(m_packetSize - static_cast<int>(packet.size()), char(0xFF)));
+    return packet;
+}
+
+bool M2tsPacketizer::selectProgramPids(QString* error) {
+    // initData carries the rewritten PAT and every packet of the PMT, including
+    // a PMT that spans several packets.
+    rewritePat();
+    m_initData = rewrittenPatPacket(m_pat.sourcePackets.first(), 0);
     for (const QByteArray& packet : m_pmt.sourcePackets) {
         m_initData += packet;
     }
@@ -534,12 +593,25 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         }
         // Transparent mode emits every synced packet verbatim (no PID filtering).
         if (!m_transparent) {
-            const int pid = pidOf(tsPacketView(packet));
+            const QByteArray tsView = tsPacketView(packet);
+            const int pid = pidOf(tsView);
             const bool selected = m_selectedPids.find(pid) != m_selectedPids.end();
             const bool keepNull = m_retainNullPackets && pid == 0x1FFF;
             if (!selected && !keepNull) {
                 --index;
                 continue;
+            }
+            // One rewritten PAT packet takes the place of the first packet of
+            // each source PAT, which keeps the source repetition rate. The other
+            // packets of a long source PAT go. PID 0 gets its own continuity
+            // counter.
+            if (pid == 0x0000) {
+                if (!payloadUnitStart(tsView)) {
+                    --index;
+                    continue;
+                }
+                packet = rewrittenPatPacket(packet, m_patContinuityCounter);
+                m_patContinuityCounter = (m_patContinuityCounter + 1) & 0x0F;
             }
         }
         payload += packet;
