@@ -5,9 +5,12 @@
 #include <QFile>
 #include <QTemporaryDir>
 
+#include <sys/stat.h>
+
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <thread>
 
 using moq2ts::M2tsObject;
 using moq2ts::M2tsPacketizer;
@@ -65,6 +68,34 @@ QList<int> pids(const Run& run) {
         result.append(pidOfPacket(packet));
     }
     return result;
+}
+// Opens path as a live source: a FIFO that a second thread fills with data.
+struct LiveRun {
+    Run run;
+    bool randomAccess = false;
+    QByteArray initData;
+    bool firstStartsGroup = false;
+};
+
+LiveRun publishLive(const QString& fifo, const QByteArray& data, bool transparent) {
+    LiveRun live;
+    ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+    std::thread writer([&] { writeFile(fifo, data); });
+    M2tsPacketizer packetizer(fifo);
+    packetizer.setTransparent(transparent);
+    if (packetizer.open(0, &live.run.error)) {
+        live.randomAccess = packetizer.randomAccess();
+        live.initData = packetizer.initData();
+        M2tsObject object;
+        while (packetizer.readObject(1, &object, &live.run.error)) {
+            if (live.run.packets.isEmpty()) {
+                live.firstStartsGroup = object.startsGroup && object.groupId == 0;
+            }
+            live.run.packets.append(object.payload);
+        }
+    }
+    writer.join();
+    return live;
 }
 }  // namespace
 
@@ -250,6 +281,48 @@ int main() {
         const Run run = publish(path, true);
         ok &= expect(run.packets.size() == 5, "SPTS to MPTS: the repeated PAT passes, the new one ends the track");
         ok &= expect(run.error.contains("unmodified-program track ends"), "SPTS to MPTS: the track ends with a reason");
+    }
+
+    // Random access (decision E2): a live source starting mid-GOP drops the
+    // lead-in, so Group 0 starts at the random access point, and declares
+    // mpeg2tsRandomAccess. A file keeps byte 0 and declares nothing. A live
+    // multiplex keeps its lead-in and declares nothing.
+    {
+        const auto stream = [](const QList<std::pair<int, int>>& programs) {
+            QByteArray ts = tb::psiPacket(0x0000, tb::patSection(programs));
+            ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+            ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), 0);            // mid-GOP
+            ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), 1, 0x40);    // random access point
+            ts += tb::tsPacket(0x100, false, QByteArray(182, char(0)), 2);
+            return ts;
+        };
+        const QByteArray single = stream({{1, 0x1000}});
+        const QByteArray rap = single.mid(3 * 188, 188);
+
+        for (const bool transparent : {false, true}) {
+            const std::string label = transparent ? "live unmodified-program" : "live per-program";
+            const LiveRun live = publishLive(dir.filePath(transparent ? "live-u.fifo" : "live-p.fifo"), single, transparent);
+            ok &= expect(live.run.error.isEmpty(), label + ": no error: " + live.run.error.toStdString());
+            ok &= expect(live.randomAccess, label + ": declares random access");
+            ok &= expect(!live.run.packets.isEmpty() && live.run.packets.first() == rap, label + ": starts at the RAP");
+            ok &= expect(live.firstStartsGroup, label + ": Group 0 starts at the RAP");
+            ok &= expect(live.initData == single.left(2 * 188) || !transparent,
+                         label + ": initData holds the source PAT and PMT");
+        }
+
+        const QString file = dir.filePath("mid-gop.ts");
+        ok &= expect(writeFile(file, single), "write mid-GOP file");
+        M2tsPacketizer packetizer(file);
+        QString error;
+        ok &= expect(packetizer.open(0, &error) && !packetizer.randomAccess(), "file: no random access");
+        M2tsObject object;
+        ok &= expect(packetizer.readObject(1, &object, &error) && moq2ts::test::pidOfFirst(object.payload) == 0,
+                     "file: byte 0 kept");
+
+        const QByteArray multiplex = stream({{1, 0x1000}, {2, 0x1001}});
+        const LiveRun live = publishLive(dir.filePath("live-m.fifo"), multiplex, true);
+        ok &= expect(!live.randomAccess && live.run.packets.size() == 5 && live.initData.isEmpty(),
+                     "live multiplex: lead-in kept, no random access, no initData");
     }
 
     // Object media time: the PTS of the first video PES in each Object, on the

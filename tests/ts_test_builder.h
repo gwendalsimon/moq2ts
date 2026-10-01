@@ -111,6 +111,12 @@ inline QByteArray tsPacket(int pid, bool payloadUnitStart, const QByteArray& pay
     return packet;
 }
 
+// The PID of the first TS packet of a payload of 188-octet packets.
+inline int pidOfFirst(const QByteArray& payload) {
+    return payload.size() < 3 ? -1
+                              : ((static_cast<unsigned char>(payload[1]) & 0x1F) << 8) | static_cast<unsigned char>(payload[2]);
+}
+
 // A PSI packet: pointer_field 0 followed by the section.
 inline QByteArray psiPacket(int pid, const QByteArray& section, int continuityCounter = 0) {
     QByteArray payload;

@@ -321,6 +321,21 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     if (m_pcrPid >= 0) {
         m_rapPid = m_pcrPid;
     }
+    // An unmodified-program track carries its source PAT and PMT as initData,
+    // so a joining subscriber can pass them to the receiver before the first
+    // Object (draft "Use of MSF Initialization Data").
+    if (m_transparent && psiFound && m_patProgramCount == 1) {
+        m_initData.clear();
+        for (const QByteArray& packet : m_pat.sourcePackets + m_pmt.sourcePackets) {
+            m_initData += packet;
+        }
+    }
+    // Decision E2 and draft "Group Boundaries": a live track drops the packets
+    // before the first random access point, so that every Group, Group 0
+    // included, starts at one. This changes where the track starts, not the
+    // packets, so the unmodified modes keep it. A file keeps byte 0. A
+    // multiplex is left alone, because its indicator comes from one program.
+    m_dropLeadIn = m_sequential && !(m_transparent && m_patProgramCount != 1);
     // readObject reads the PSI again from the start, so the assemblers restart.
     // The stored tables stay, so the same tables count as repeats.
     m_patAssembler.reset();
@@ -666,6 +681,13 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
                 break;
             }
         }
+        if (m_dropLeadIn && !m_leadInDropped) {
+            if (!startsRandomAccess(pid, tsView)) {
+                --index;
+                continue;
+            }
+            m_leadInDropped = true;
+        }
         // Transparent mode emits every synced packet verbatim (no PID filtering).
         if (!m_transparent) {
             const bool selected = m_selectedPids.find(pid) != m_selectedPids.end();
@@ -752,6 +774,20 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     object->startsGroup = rapDetected;
     ++m_nextObjectId;
     return true;
+}
+
+bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
+    if (pid <= 0x001F || pid == 0x1FFF || !hasRandomAccessIndicator(tsPacket)) {
+        return false;
+    }
+    if (m_rapPid < 0) {
+        m_rapPid = pid;   // fallback: latch on the first PID with the indicator
+    }
+    return pid == m_rapPid;
+}
+
+bool M2tsPacketizer::randomAccess() const {
+    return m_dropLeadIn;
 }
 
 bool M2tsPacketizer::hasRandomAccessIndicator(const QByteArray& tsPacket) const {

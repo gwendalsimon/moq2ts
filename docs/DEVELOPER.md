@@ -279,7 +279,9 @@ Field presence is conditional:
 - `mpeg2tsTimestampMode` is valid only for 192-octet source packets and MUST
   NOT appear for 188.
 - `mpeg2tsRandomAccess` is advertised only when the first Object of every
-  Group contains a random access point.
+  Group contains a random access point. A live source (pipe, FIFO, SRT)
+  drops the packets before its first random access point and declares it,
+  except for `unmodified-multiplex`. A file keeps byte 0 and does not.
 
 ## Timeline track
 

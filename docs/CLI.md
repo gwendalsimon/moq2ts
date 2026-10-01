@@ -171,11 +171,12 @@ for a fidelity check, capture the emitted payloads and `cmp` against the source
 `.ts`. The catalog JSON should contain
 `"mpeg2tsMode":"unmodified-program"` when the source PAT lists one program,
 and `"mpeg2tsMode":"unmodified-multiplex"` otherwise. Neither contains
-`mpeg2tsSiPids` or a root `initDataList`. An `unmodified-multiplex` catalog
-must NOT contain `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, or
-`mpeg2tsMuxRate`.
+`mpeg2tsSiPids`. An `unmodified-program` catalog carries the source PAT and
+PMT in a root `initDataList`. An `unmodified-multiplex` catalog must NOT
+contain `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, or a root
+`initDataList`.
 
-In per-program mode the PAT/PMT bootstrap is carried the way MSF-01 defines it: the
+In per-program mode the PAT/PMT bootstrap (with the rewritten PAT) is carried the way MSF-01 defines it: the
 track gets an `initRef` string, and the bytes live in a root `initDataList` entry
 of type `inline`. The older MSF-00 spelling put a base64 `initData` field on the
 track itself; catalogs in that shape are still parsed on the receive side, but are
