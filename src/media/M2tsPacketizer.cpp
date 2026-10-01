@@ -325,11 +325,9 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     // so a joining subscriber can pass them to the receiver before the first
     // Object (draft "Use of MSF Initialization Data").
     if (m_transparent && psiFound && m_patProgramCount == 1) {
-        m_initData.clear();
-        for (const QByteArray& packet : m_pat.sourcePackets + m_pmt.sourcePackets) {
-            m_initData += packet;
-        }
+        refreshInitData();
     }
+    m_initDataChanged = false;
     // Decision E2 and draft "Group Boundaries": a live track drops the packets
     // before the first random access point, so that every Group, Group 0
     // included, starts at one. This changes where the track starts, not the
@@ -493,6 +491,7 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
         rewritePat();
         selectPids();
     }
+    refreshInitData();
 }
 
 void M2tsPacketizer::endTrack(const QString& reason) {
@@ -520,9 +519,9 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     if (!m_opened) {
         return;
     }
-    // A PMT change during the session. The catalog and its initData keep the
-    // values from the start: the draft lets the PSI in the packets take
-    // precedence for the advisory fields.
+    // A PMT change during the session. initData follows it, and the pipeline
+    // publishes it in a new catalog. The advisory fields keep their values from
+    // the start: the draft lets the PSI in the packets take precedence.
     qWarning("The PMT of program %d changed; the track follows it.", m_programNumber);
     if (m_pcrPid >= 0) {
         m_rapPid = m_pcrPid;
@@ -530,6 +529,40 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     if (!m_transparent) {
         selectPids();
     }
+    refreshInitData();
+}
+
+void M2tsPacketizer::refreshInitData() {
+    // initData is the PAT and the PMT that the track carries: the rewritten PAT
+    // in per-program carriage, the source PAT in unmodified-program carriage.
+    // A multiplex has none. While a moved PMT has not arrived yet, the tables
+    // do not match, so initData waits for it.
+    const int programs = m_opened ? m_openProgramCount : m_patProgramCount;
+    if ((m_transparent && programs != 1) || m_pat.bytes.isEmpty() || m_pmt.bytes.isEmpty()) {
+        return;
+    }
+    QByteArray initData = m_transparent ? QByteArray() : rewrittenPatPacket(m_pat.sourcePackets.first(), 0);
+    if (m_transparent) {
+        for (const QByteArray& packet : m_pat.sourcePackets) {
+            initData += packet;
+        }
+    }
+    for (const QByteArray& packet : m_pmt.sourcePackets) {
+        initData += packet;
+    }
+    if (initData != m_initData) {
+        m_initData = initData;
+        m_initDataChanged = true;
+    }
+}
+
+bool M2tsPacketizer::takeInitDataChange(QByteArray* initData) {
+    if (!m_initDataChanged) {
+        return false;
+    }
+    m_initDataChanged = false;
+    *initData = m_initData;
+    return true;
 }
 
 void M2tsPacketizer::rewritePat() {
@@ -591,10 +624,7 @@ bool M2tsPacketizer::selectProgramPids(QString* error) {
     // initData carries the rewritten PAT and every packet of the PMT, including
     // a PMT that spans several packets.
     rewritePat();
-    m_initData = rewrittenPatPacket(m_pat.sourcePackets.first(), 0);
-    for (const QByteArray& packet : m_pmt.sourcePackets) {
-        m_initData += packet;
-    }
+    refreshInitData();
 
     if (m_elementaryPids.empty()) {
         if (error) {

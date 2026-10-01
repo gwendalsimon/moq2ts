@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -12,6 +13,7 @@
 #include "../app/PublishConfig.h"
 #include "../publish/MoqxrPublisher.h"
 #include "M2tsPacketizer.h"
+#include "MsftsMuxer.h"
 
 namespace moq2ts {
 
@@ -35,7 +37,11 @@ struct PublishState {
     QByteArray timelineRecords;
     std::optional<std::uint64_t> timelineGroupId;
     std::int64_t pacingStartUs = -1;
-    std::optional<PublishedObject> pendingTimeline;
+    // Objects to return before reading the next one, in order.
+    std::deque<PublishedObject> pending;
+    // The catalog as published, and the group of its last catalog object.
+    MsftsCatalog catalog;
+    std::uint64_t catalogGroupId = 0;
     std::shared_ptr<M2tsPacketizer> packetizer;   // file / SRT path
     std::shared_ptr<void> capture;                // capture path (LibavCaptureSource)
 };

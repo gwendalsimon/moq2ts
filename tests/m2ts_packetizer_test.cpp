@@ -227,6 +227,38 @@ int main() {
                      "PMT change: the new audio PID is kept after the change only");
     }
 
+    // A PMT change gives new initData once; a repeated PMT does not. In
+    // per-program carriage it starts with the rewritten PAT, in
+    // unmodified-program carriage with the source PAT.
+    for (const bool transparent : {false, true}) {
+        const std::string label = transparent ? "unmodified-program initData change" : "per-program initData change";
+        const QByteArray pat = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        const QByteArray pmt0 = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}, 0), 0);
+        const QByteArray pmt0Again = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}, 0), 1);
+        const QByteArray pmt1 = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}, {0x0F, 0x101}}, 1), 2);
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        const QString path = dir.filePath(transparent ? "init-change-u.ts" : "init-change-p.ts");
+        ok &= expect(writeFile(path, pat + pmt0 + video + pmt0Again + video + pmt1 + video), label + ": write");
+        M2tsPacketizer packetizer(path);
+        packetizer.setTransparent(transparent);
+        QString error;
+        ok &= expect(packetizer.open(0, &error), label + ": opens");
+        const QByteArray initial = packetizer.initData();
+        M2tsObject object;
+        QList<int> changedAt;
+        QByteArray changed;
+        for (int index = 0; packetizer.readObject(1, &object, &error); ++index) {
+            QByteArray initData;
+            if (packetizer.takeInitDataChange(&initData)) {
+                changedAt.append(index);
+                changed = initData;
+            }
+        }
+        ok &= expect(changedAt == QList<int>({5}), label + ": one change, at the Object with the new PMT");
+        ok &= expect(changed.mid(188) == pmt1 && changed.left(188) == initial.left(188),
+                     label + ": the new initData has the same PAT and the new PMT");
+    }
+
     // Live PSI tracking: the PMT moves to a new PID. The filter follows it, and
     // the rewritten PAT gets version 1 with the new PMT PID.
     {

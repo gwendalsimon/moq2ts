@@ -100,8 +100,11 @@ media publishing. It currently provides:
     before objectization, with a PAT rewritten to list that program only.
   - Follows PAT and PMT changes during the session. A per-program track ends
     when its program leaves the PAT. An unmodified-program track ends when the
-    PAT no longer lists its program alone. The catalog keeps the values from
-    the start.
+    PAT no longer lists its program alone. When the change alters initData,
+    `LivePipeline::updateCatalog` publishes a new independent catalog before
+    the Object that carries the change (MSF -01 Section 5.3 forbids changing
+    a declared track). The other catalog fields keep their values from the
+    start.
 
 - `src/media/LibavCaptureSource.*`
   - Optional direct libavdevice capture path.
