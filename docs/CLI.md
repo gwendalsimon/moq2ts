@@ -55,13 +55,14 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--namespace <ns>` | `live/ch1` | MOQ track namespace |
 | `--video <path>` | - | TS/M2TS source: seekable file, FIFO, or `/dev/stdin` |
 | `--audio <path>` | - | Alternate single-stream TS source path |
-| `--srt-config <path>` | - | SRT ingest: JSON caller config (see below). Takes the place of `--video`, and implies `--transparent` |
+| `--srt-config <path>` | - | SRT ingest: JSON caller config (see below). Takes the place of `--video`, and implies `--unmodified` |
 | `--camera <id>` / `--mic <id>` | - | Capture device ids (instead of a TS source) |
-| `--program <n>` | `0` | MPEG program to select (0 = first); ignored with `--transparent` |
-| `--transparent` | off | Carry the **whole multiplex verbatim** (no PID filter/rewrite, no initialization data) |
-| `--retain-si` | off | Filtered mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT) |
-| `--retain-null` | off | Filtered mode: also keep null (0x1FFF) packets |
-| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s (0 omits the catalog hint). Per-program mode only: the draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--transparent` and SRT ingest ignore it with a warning |
+| `--program <n>` | `0` | MPEG program to select (0 = first); ignored with `--unmodified` |
+| `--unmodified` | off | Unmodified carriage: forward every source packet unchanged (no PID filter or rewrite, no initialization data). The track is `unmodified-program` for a single-program source and `unmodified-multiplex` otherwise |
+| `--transparent` | off | Alias of `--unmodified`, kept for existing scripts |
+| `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT) |
+| `--retain-null` | off | Per-program mode: also keep null (0x1FFF) packets |
+| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s (0 omits the catalog hint). The draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--unmodified` and SRT ingest drop it when the source PAT lists several programs, and warn |
 | `--fragment-ms <ms>` | `250` | Group cadence |
 | `--segment-bytes <n>` | `65536` | Target object size |
 | `--draft <n>` | `16` | MOQ draft version (14 or 16) |
@@ -75,13 +76,13 @@ on error, 2 on invalid arguments.
 ## Run: seekable file
 
 ```bash
-# Filtered single-program (default behavior) with a mux-rate hint.
+# Per-program carriage (default behavior) with a mux-rate hint.
 ./build-mock/moq2ts-cli --endpoint mock://local --namespace live/ch1 \
     --video sample.ts --program 1 --mux-rate 38000000
 
-# Transparent whole-multiplex passthrough.
+# Unmodified carriage of every source packet.
 ./build-mock/moq2ts-cli --endpoint mock://local --namespace live/ch1 \
-    --transparent --video sample.ts
+    --unmodified --video sample.ts
 ```
 
 ## Run: live feed over SRT
@@ -116,7 +117,7 @@ ffmpeg -re -i input.ts -c copy -f mpegts \
 
 # Publisher side: connect, ingest, publish.
 ./build/moq2ts-cli --endpoint <relay-url> --namespace live/ch1 \
-    --srt-config ./srt_callers.json --transparent
+    --srt-config ./srt_callers.json --unmodified
 ```
 
 `pkt_size=1316` is worth keeping: 1316 = 7 x 188, so each SRT payload holds a
@@ -124,11 +125,11 @@ whole number of TS packets and no packet straddles a datagram boundary.
 `latency_ms` sets SRT's retransmit buffer, which absorbs network jitter on the
 ingest side before the publisher ever sees the bytes.
 
-**SRT ingest always runs in transparent mode.** A contribution feed carries the
-whole multiplex, so the filtered-mode options (`--retain-si`, `--retain-null`,
+**SRT ingest always uses unmodified carriage.** A contribution feed is forwarded
+as received, so the per-program options (`--retain-si`, `--retain-null`,
 `--program`) do not apply and are ignored; passing them prints a warning. The
-same goes for `--mux-rate`, which the catalog only carries in per-program mode.
-Use a file or FIFO source if you need filtered single-program publishing.
+catalog drops `--mux-rate` when the source PAT lists several programs.
+Use a file or FIFO source if you need per-program publishing.
 
 ## Run: live feed from ffmpeg (server / near-encoder)
 
@@ -141,7 +142,7 @@ already created the path, and without it ffmpeg prompts to overwrite and exits.
 mkfifo /tmp/live.ts
 
 # ffmpeg produces a continuous MPEG-TS into the FIFO (test source shown; swap in
-# your real input with -i). Transparent mode is the byte-faithful passthrough path.
+# your real input with -i). Unmodified carriage is the byte-faithful path.
 ffmpeg -re -y \
   -f lavfi -i "testsrc2=size=1280x720:rate=30" \
   -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
@@ -149,7 +150,7 @@ ffmpeg -re -y \
   -f mpegts -muxrate 6M -pcr_period 20 /tmp/live.ts &
 
 ./build/moq2ts-cli --endpoint <relay-url> --namespace live/ch1 \
-    --transparent --video /tmp/live.ts
+    --unmodified --video /tmp/live.ts
 ```
 
 ### Via a stdin pipe
@@ -159,20 +160,22 @@ ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" \
   -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
   -c:v libx264 -b:v 4M -c:a aac -f mpegts -muxrate 6M - \
   | ./build/moq2ts-cli --endpoint <relay-url> --namespace live/ch1 \
-        --transparent --video /dev/stdin
+        --unmodified --video /dev/stdin
 ```
 
 ## Verify byte-faithful passthrough
 
-For a file source in transparent mode the published payload must equal the input
+For a file source with unmodified carriage the published payload must equal the input
 byte-for-byte. Under the mock build, the mock publisher logs objects to stderr;
 for a fidelity check, capture the emitted payloads and `cmp` against the source
-`.ts`. The catalog JSON (also logged) should contain
-`"mpeg2tsMode":"unmodified-multiplex"`, and must NOT contain
-`mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`,
-`mpeg2tsSiPids`, or a root `initDataList`.
+`.ts`. The catalog JSON should contain
+`"mpeg2tsMode":"unmodified-program"` when the source PAT lists one program,
+and `"mpeg2tsMode":"unmodified-multiplex"` otherwise. Neither contains
+`mpeg2tsSiPids` or a root `initDataList`. An `unmodified-multiplex` catalog
+must NOT contain `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, or
+`mpeg2tsMuxRate`.
 
-In filtered mode the PAT/PMT bootstrap is carried the way MSF-01 defines it: the
+In per-program mode the PAT/PMT bootstrap is carried the way MSF-01 defines it: the
 track gets an `initRef` string, and the bytes live in a root `initDataList` entry
 of type `inline`. The older MSF-00 spelling put a base64 `initData` field on the
 track itself; catalogs in that shape are still parsed on the receive side, but are
@@ -183,7 +186,7 @@ no longer produced.
 - **Live stream = live catalog.** A non-seekable source (FIFO/stdin) is detected
   automatically and advertised as `isLive: true`; VOD duration probing is skipped
   (it would otherwise open and consume the pipe a second time).
-- **Filtered mode over a pipe** works too: the PAT/PMT init scan is buffered and
+- **Per-program mode over a pipe** works too: the PAT/PMT init scan is buffered and
   replayed so no leading packets are lost. If the source never emits PAT/PMT within
-  the first ~4096 packets, filtered init fails with a clear error - use
-  `--transparent` for whole-multiplex feeds.
+  the first ~4096 packets, per-program init fails with a clear error - use
+  `--unmodified` for such feeds.

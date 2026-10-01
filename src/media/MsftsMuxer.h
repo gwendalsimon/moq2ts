@@ -4,7 +4,18 @@
 #include <QList>
 #include <QString>
 
+#include <cstdint>
+
 namespace moq2ts {
+
+// The values of mpeg2tsMode (draft-gregoire-moq-msfts) whose Objects carry the
+// TS packets of a program or a multiplex. The fourth value, es-packets, needs
+// mpeg2tsEsPid, which this encoder does not produce; the parser skips it.
+enum class Mpeg2tsMode {
+    UnmodifiedProgram,
+    UnmodifiedMultiplex,
+    PerProgram,
+};
 
 struct MsftsCatalog {
     QString track;
@@ -34,20 +45,20 @@ struct MsftsCatalog {
     // VOD-only track duration in integer milliseconds (MSF 5.1.37); emitted only
     // when isLive is false and the value is > 0.
     qint64 trackDurationMs = 0;
-    // When true, advertise mpeg2tsRandomAccess (draft-gregoire-moq-msfts): every
-    // MOQT group begins at a random-access point.
+    // When true, advertise mpeg2tsRandomAccess (draft-gregoire-moq-msfts): the
+    // first Object of every MOQT Group contains a random access point.
     bool randomAccess = false;
 
-    // Whole-multiplex (transparent) profile: when true the track carries the
-    // full multiplex verbatim. Advertised as mpeg2tsMode "unmodified-multiplex"
-    // (draft-gregoire-moq-msfts); when false, advertised as "per-program" and
-    // the per-program fields (mpeg2tsProgramNumber/mpeg2tsPcrPid) are included.
-    bool wholeMultiplex = false;
+    // Advertised as mpeg2tsMode (draft-gregoire-moq-msfts). The two unmodified
+    // modes carry the source verbatim: UnmodifiedProgram when its PAT lists one
+    // program, UnmodifiedMultiplex otherwise. PerProgram is a program derived by
+    // filtering.
+    Mpeg2tsMode mode = Mpeg2tsMode::PerProgram;
     // Advisory source constant mux rate in bits/s. Emitted as mpeg2tsMuxRate
-    // only when > 0 and the track is not whole-multiplex.
+    // only when > 0 and the mode is not UnmodifiedMultiplex.
     qint64 mpeg2tsMuxRateBps = 0;
 
-    // MSF common track/root fields (draft-ietf-moq-msf-00).
+    // MSF common track/root fields (draft-ietf-moq-msf-01).
     bool isLive = true;
     int targetLatencyMs = 1000;
     QString role = QStringLiteral("video");
@@ -60,8 +71,17 @@ class MsftsMuxer {
 public:
     static QByteArray catalogJson(const MsftsCatalog& catalog);
 
+    // One MSF media timeline record (draft-ietf-moq-msf-01 Section 7.1.1):
+    //   [mediaPresentationTimeMs, [groupId, objectId], wallclockMs]
+    // Both times are the floor in integral milliseconds. wallclockUnixUs is 0
+    // when the wallclock time is unknown, as for a VOD asset.
+    static QByteArray mediaTimelineRecord(std::uint64_t mediaTimeUs,
+                                          std::uint64_t groupId,
+                                          std::uint64_t objectId,
+                                          std::uint64_t wallclockUnixUs);
+
     // Inverse of catalogJson: parse an MSFTS catalog document and fill the
-    // mpeg2ts media-track fields a receiver needs (packetSize, wholeMultiplex,
+    // mpeg2ts media-track fields a receiver needs (packetSize, mode,
     // program/pcr, muxRate, randomAccess, timestampMode, isLive, decoded
     // initData). The media track's name is returned via mediaTrackName. Returns
     // false (and sets error) when the document is invalid or has no mpeg2ts

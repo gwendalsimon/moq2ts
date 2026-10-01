@@ -131,18 +131,21 @@ int main(int argc, char** argv) {
     addValue(QStringLiteral("segment-bytes"), QStringLiteral("Target object size (bytes)."), QStringLiteral("bytes"), QStringLiteral("65536"));
     addValue(QStringLiteral("program"), QStringLiteral("MPEG program number (0 = first)."), QStringLiteral("n"), QStringLiteral("0"));
     // MSFTS carriage-profile options (msfts#7).
-    addValue(QStringLiteral("mux-rate"), QStringLiteral("Advisory source mux rate (bits/s), per-program mode only; 0 omits the catalog hint."),
+    addValue(QStringLiteral("mux-rate"), QStringLiteral("Advisory source mux rate (bits/s); 0 omits the catalog hint. Dropped when an unmodified source lists several programs."),
              QStringLiteral("bps"), QStringLiteral("0"));
-    parser.addOption(QCommandLineOption(QStringLiteral("transparent"),
-        QStringLiteral("Transparent/whole-multiplex passthrough (no PID filtering or rewrite).")));
+    // --transparent is the original name, kept so existing scripts still work.
+    parser.addOption(QCommandLineOption(QStringList{QStringLiteral("unmodified"), QStringLiteral("transparent")},
+        QStringLiteral("Unmodified carriage: forward every source packet unchanged. The track is "
+                       "unmodified-program for a single-program source and unmodified-multiplex "
+                       "otherwise. --transparent is an alias.")));
     parser.addOption(QCommandLineOption(QStringLiteral("paced"),
         QStringLiteral("Pace file-source publishing at media-time rate (prevents dumping all data at wire speed).")));
     addValue(QStringLiteral("draft"), QStringLiteral("MOQ draft version (14 or 16)."),
              QStringLiteral("version"), QStringLiteral("16"));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-si"),
-        QStringLiteral("Filtered mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT).")));
+        QStringLiteral("Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT).")));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-null"),
-        QStringLiteral("Filtered mode: also keep null (0x1FFF) packets.")));
+        QStringLiteral("Per-program mode: also keep null (0x1FFF) packets.")));
     // SRT ingest source (alternative to --video file).
     // Uses a JSON config file matching moqxr's format:
     //   { "srt_callers": [{ "id": "...", "srt": { "mode": "caller", "host": "...", "port": N, "latency_ms": N } }] }
@@ -172,7 +175,7 @@ int main(int argc, char** argv) {
     cfg.targetSegmentBytes = parser.value(QStringLiteral("segment-bytes")).toInt();
     cfg.programNumber = parser.value(QStringLiteral("program")).toInt();
     cfg.mpeg2tsMuxRateBps = parser.value(QStringLiteral("mux-rate")).toInt();
-    cfg.transparentMode = parser.isSet(QStringLiteral("transparent"));
+    cfg.transparentMode = parser.isSet(QStringLiteral("unmodified"));
     cfg.pacedFileSource = parser.isSet(QStringLiteral("paced"));
     cfg.draftVersion = parser.value(QStringLiteral("draft")).toInt();
     cfg.retainSiTables = parser.isSet(QStringLiteral("retain-si"));
@@ -269,11 +272,11 @@ int main(int argc, char** argv) {
 
         // SRT is a live source - no pacing needed (real-time from encoder)
         cfg.pacedFileSource = false;
-        // Force transparent mode for SRT (whole multiplex). An SRT contribution feed
-        // carries the complete multiplex, so filtering it down to one program is not
-        // what this path is for. Say so rather than overriding in silence: the
-        // filtered-only options otherwise appear to be accepted and then do nothing,
-        // which is indistinguishable from a bug in the filter itself.
+        // Force unmodified carriage for SRT. An SRT contribution feed is forwarded
+        // as received, so deriving one program from it is not what this path is
+        // for. Say so rather than overriding in silence: the per-program options
+        // otherwise appear to be accepted and then do nothing, which is
+        // indistinguishable from a bug in the filter itself.
         if (!cfg.transparentMode) {
             QStringList ignored;
             if (cfg.retainSiTables) {
@@ -287,8 +290,8 @@ int main(int argc, char** argv) {
             }
             if (!ignored.isEmpty()) {
                 logLine(stderr, "warn",
-                        QStringLiteral("%1 %2 only meaningful in filtered mode; SRT ingest always "
-                                       "carries the whole multiplex, so %3 ignored.")
+                        QStringLiteral("%1 %2 only meaningful in per-program mode; SRT ingest always "
+                                       "forwards the source unmodified, so %3 ignored.")
                             .arg(ignored.join(QStringLiteral(", ")),
                                  ignored.size() == 1 ? QStringLiteral("is") : QStringLiteral("are"),
                                  ignored.size() == 1 ? QStringLiteral("it is") : QStringLiteral("they are")));
@@ -300,10 +303,12 @@ int main(int argc, char** argv) {
 
     // The draft forbids mpeg2tsMuxRate in unmodified-multiplex mode, so the
     // catalog drops it; say so rather than accepting a value that does nothing.
+    // Whether an unmodified source is a multiplex is known only once its PAT
+    // is read, so the warning names the condition.
     if (cfg.transparentMode && cfg.mpeg2tsMuxRateBps > 0) {
         logLine(stderr, "warn",
-                QStringLiteral("--mux-rate is only emitted in per-program mode; transparent "
-                               "(unmodified-multiplex) publishing ignores it."));
+                QStringLiteral("--mux-rate is ignored in unmodified publishing when the source "
+                               "PAT lists several programs (unmodified-multiplex)."));
     }
 
     // Validation mirrors the GUI guards.

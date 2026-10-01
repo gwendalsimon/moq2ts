@@ -142,8 +142,9 @@ exists. Launch the packaged app with:
 - **Catalog**: the media track uses `packaging: "mpeg2ts"` with MSF common
   fields (`isLive`, `role`, `mimeType`, `targetLatency`) and MSFTS mpeg2ts
   fields (`mpeg2tsMode`, `mpeg2tsPacketSize`, `mpeg2tsProgramNumber` and
-  optional `mpeg2tsPcrPid` on the `per-program` mode, and
-  `mpeg2tsRandomAccess` when every group starts on a random-access point).
+  optional `mpeg2tsPcrPid` on the `per-program` and `unmodified-program`
+  modes, and `mpeg2tsRandomAccess` when the first Object of every Group
+  contains a random access point).
   `mpeg2tsTimestampMode` is emitted only for 192-octet source packets.
 - **Initialization data**: the packetizer scans the start of the source for
   PAT and PMT packets and emits them as Base64 `initData`, preserving 188-byte
@@ -153,7 +154,7 @@ exists. Launch the packaged app with:
   elementary PIDs for that program. Packets for other programs and null packets
   are dropped before publication.
 - **Timeline track**: each media track gets a `<stream>.timeline` side track of
-  MSF `type: "mediatimeline"` that `depends` on the media track. Timeline objects
+  MSF `packaging: "mediatimeline"` that `depends` on the media track. Timeline objects
   are a compact `[mediaTimeMs, [groupId, objectId], wallclockMs]` record array
   mapping media presentation time to Unix wall-clock milliseconds without
   modifying M2TS payloads.

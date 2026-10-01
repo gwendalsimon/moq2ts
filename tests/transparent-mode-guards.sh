@@ -16,13 +16,16 @@ fail() { printf '%s\n' "$1" >&2; exit 1; }
 grep -q 'bool transparentMode = false;' "$CFG" \
   || fail "PublishConfig must carry transparentMode defaulting to false"
 
-# Catalog carries and gates the whole-multiplex flag (draft field: mpeg2tsMode).
-grep -q 'bool wholeMultiplex' "$HDR" \
-  || fail "MsftsCatalog must carry wholeMultiplex"
-grep -q 'catalog.wholeMultiplex' "$MUXER" \
-  || fail "mpeg2tsMode emission must be gated on catalog.wholeMultiplex"
+# Catalog carries the carriage mode and gates the program fields on it (draft
+# field: mpeg2tsMode).
+grep -q 'Mpeg2tsMode mode' "$HDR" \
+  || fail "MsftsCatalog must carry the mpeg2tsMode value"
+grep -q 'catalog.mode != Mpeg2tsMode::UnmodifiedMultiplex' "$MUXER" \
+  || fail "program fields must be gated on the unmodified-multiplex mode"
 grep -q '"unmodified-multiplex"' "$MUXER" \
   || fail "catalog must emit the draft-conformant unmodified-multiplex mode"
+grep -q '"unmodified-program"' "$MUXER" \
+  || fail "catalog must emit the draft-conformant unmodified-program mode"
 grep -q '"per-program"' "$MUXER" \
   || fail "catalog must emit the draft-conformant per-program mode"
 # The legacy m2tsMpts/m2tsTransparent spellings stay accepted on parse for interop.
@@ -43,7 +46,7 @@ grep -q 'setTransparent' "$PKT" \
 # Pipeline wires the packetizer and catalog for transparent mode.
 grep -q 'setTransparent(m_config.transparentMode)' "$PIPE" \
   || fail "pipeline must pass transparentMode into the packetizer"
-grep -q '.wholeMultiplex = m_config.transparentMode' "$PIPE" \
-  || fail "pipeline must set catalog wholeMultiplex from config"
+grep -q 'packetizer.patProgramCount() == 1' "$PIPE" \
+  || fail "pipeline must pick the unmodified mode from the PAT program count"
 
 printf 'transparent-mode guards passed\n'

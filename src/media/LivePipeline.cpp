@@ -6,9 +6,6 @@
 #include <thread>
 #include <QDateTime>
 #include <QDebug>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QThread>
 
 #include "EgressPacing.h"
@@ -28,27 +25,29 @@ std::uint64_t nowUnixUs() {
 // latency stays near zero; only objects arriving ahead of their media time wait.
 constexpr std::int64_t kPaceSlackUs = 8000;
 
-// Builds an MSF media timeline payload (draft-ietf-moq-msf-00 Section 7.1): a
-// JSON array of records, each a three-item array
-//   [ mediaPresentationTimeMs, [groupId, objectId], wallclockMs ]
-// where wallclock is milliseconds since the Unix epoch (0 when unknown). A
-// single timeline object carries one record here.
-QByteArray timelinePayload(std::uint64_t mediaGroupId,
-                           std::uint64_t mediaObjectId,
-                           std::uint64_t mediaTimeUs,
-                           std::uint64_t wallClockUnixUs) {
-    QJsonArray location;
-    location.append(static_cast<qint64>(mediaGroupId));
-    location.append(static_cast<qint64>(mediaObjectId));
+// Adds the record of a media Group and returns Object 0 of the timeline Group
+// of the same number, which holds every accessible record (MSF -01 Section
+// 7.3). The history has no bound yet (moq-wg/msf#205).
+PublishedObject timelineObject(PublishState* st,
+                               const QString& timelineTrackName,
+                               const PublishedObject& media,
+                               std::uint64_t mediaTimeUs,
+                               std::uint64_t wallClockUnixUs) {
+    if (!st->timelineRecords.isEmpty()) {
+        st->timelineRecords += ',';
+    }
+    st->timelineRecords += MsftsMuxer::mediaTimelineRecord(mediaTimeUs, media.groupId, media.objectId, wallClockUnixUs);
+    st->timelineGroupId = media.groupId;
 
-    QJsonArray record;
-    record.append(static_cast<qint64>((mediaTimeUs + 500ULL) / 1000ULL));
-    record.append(location);
-    record.append(static_cast<qint64>((wallClockUnixUs + 500ULL) / 1000ULL));
-
-    QJsonArray records;
-    records.append(record);
-    return QJsonDocument(records).toJson(QJsonDocument::Compact);
+    PublishedObject timeline;
+    timeline.trackName = timelineTrackName;
+    timeline.payload = '[' + st->timelineRecords + ']';
+    timeline.groupId = media.groupId;
+    timeline.objectId = 0;
+    timeline.finalInGroup = true;
+    timeline.mediaTimeUs = media.mediaTimeUs;
+    timeline.mediaDurationUs = 0;
+    return timeline;
 }
 
 } // namespace
@@ -188,13 +187,11 @@ void LivePipeline::runLoop() {
             .generatedAtMs = QDateTime::currentMSecsSinceEpoch(),
         });
 
-        const int timelineEveryObjects = std::max(1, 1000 / std::max(1, m_config.fragmentDurationMs));
-
         auto st = std::make_shared<PublishState>();
         st->capture = capturePtr;   // keeps the source alive alongside the counters
         auto* capturePtrRaw = capturePtr.get();
 
-        auto nextObject = [this, st, capturePtrRaw, packetsPerObject, trackName, timelineTrackName, timelineEveryObjects]() -> std::optional<PublishedObject> {
+        auto nextObject = [this, st, capturePtrRaw, packetsPerObject, trackName, timelineTrackName]() -> std::optional<PublishedObject> {
             if (!m_running.load(std::memory_order_acquire)) {
                 return std::nullopt;
             }
@@ -223,18 +220,11 @@ void LivePipeline::runLoop() {
             published.startsGroup = startsGroup;
             published.mediaTimeUs = object.mediaTimeUs;
             published.mediaDurationUs = static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
-            if (startsGroup || (st->objects % timelineEveryObjects) == 0) {
-                PublishedObject timeline;
-                timeline.trackName = timelineTrackName;
-                timeline.payload = timelinePayload(published.groupId,
-                                                   published.objectId,
-                                                   published.mediaTimeUs,
-                                                   nowUnixUs());
-                timeline.groupId = published.groupId;
-                timeline.objectId = st->timelineObjectId++;
-                timeline.mediaTimeUs = published.mediaTimeUs;
-                timeline.mediaDurationUs = 0;
-                st->pendingTimeline = std::move(timeline);
+            // One timeline record per media Group, for its first Object that
+            // starts a video PES, with that PES's PTS (MSF 7.1.1).
+            if (object.ptsUs.has_value() && st->timelineGroupId != published.groupId) {
+                st->pendingTimeline = timelineObject(st.get(), timelineTrackName, published,
+                                                     *object.ptsUs, nowUnixUs());
             }
             ++st->objects;
             st->bytes += published.payload.size();
@@ -317,7 +307,11 @@ void LivePipeline::runLoop() {
         .namespaceName = m_config.namespaceName,
         .trackDurationMs = fileDurationMs,
         .randomAccess = true,
-        .wholeMultiplex = m_config.transparentMode,
+        // Unmodified carriage: unmodified-program for a one-program PAT,
+        // unmodified-multiplex otherwise (an unparsed PAT counts as a multiplex).
+        .mode = !m_config.transparentMode             ? Mpeg2tsMode::PerProgram
+                : packetizer.patProgramCount() == 1   ? Mpeg2tsMode::UnmodifiedProgram
+                                                      : Mpeg2tsMode::UnmodifiedMultiplex,
         .mpeg2tsMuxRateBps = m_config.mpeg2tsMuxRateBps,
         .isLive = false,
         .bitrateBps = static_cast<qint64>(m_config.videoTargetBitrateKbps) * 1000,
@@ -342,13 +336,11 @@ void LivePipeline::runLoop() {
     const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
 
     constexpr std::int64_t kPaceSlackUs = 10000; // 10 ms slack
-    const int timelineEveryObjects = std::max(1, 1000 / std::max(1, m_config.fragmentDurationMs));
-
     // Shared with the lambda by VALUE, so nothing it touches lives on this frame.
     auto st = std::make_shared<PublishState>();
     st->packetizer = packetizerPtr;
 
-    auto nextObject = [this, st, packetsPerObject, trackName, timelineTrackName, timelineEveryObjects]() -> std::optional<PublishedObject> {
+    auto nextObject = [this, st, packetsPerObject, trackName, timelineTrackName, liveStream]() -> std::optional<PublishedObject> {
         if (!m_running.load(std::memory_order_acquire)) {
             return std::nullopt;
         }
@@ -375,18 +367,13 @@ void LivePipeline::runLoop() {
         published.startsGroup = object.startsGroup;
         published.mediaTimeUs = static_cast<std::uint64_t>(st->objects) * static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
         published.mediaDurationUs = static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
-        if ((st->objects % timelineEveryObjects) == 0) {
-            PublishedObject timeline;
-            timeline.trackName = timelineTrackName;
-            timeline.payload = timelinePayload(published.groupId,
-                                               published.objectId,
-                                               published.mediaTimeUs,
-                                               nowUnixUs());
-            timeline.groupId = published.groupId;
-            timeline.objectId = st->timelineObjectId++;
-            timeline.mediaTimeUs = published.mediaTimeUs;
-            timeline.mediaDurationUs = 0;
-            st->pendingTimeline = std::move(timeline);
+        // One timeline record per media Group, for its first Object that starts
+        // a video PES: MSF 7.1.1 gives the record the PTS of the first media
+        // sample in the Object. mediaTimeUs above stays the pacing clock.
+        if (object.ptsUs.has_value() && st->timelineGroupId != published.groupId) {
+            // MSF 7.1.1: the wallclock time SHOULD be 0 for a VOD asset.
+            st->pendingTimeline = timelineObject(st.get(), timelineTrackName, published,
+                                                 *object.ptsUs, liveStream ? nowUnixUs() : 0);
         }
         ++st->objects;
         st->bytes += published.payload.size();

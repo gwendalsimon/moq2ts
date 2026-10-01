@@ -30,7 +30,10 @@ namespace moq2ts {
 struct PublishState {
     std::int64_t objects = 0;
     std::int64_t bytes = 0;
-    std::uint64_t timelineObjectId = 0;
+    // MSF media timeline history (draft-ietf-moq-msf-01 Section 7.3): every
+    // record so far, comma-separated, and the last media Group recorded.
+    QByteArray timelineRecords;
+    std::optional<std::uint64_t> timelineGroupId;
     std::int64_t pacingStartUs = -1;
     std::optional<PublishedObject> pendingTimeline;
     std::shared_ptr<M2tsPacketizer> packetizer;   // file / SRT path

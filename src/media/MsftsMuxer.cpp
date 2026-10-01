@@ -7,6 +7,22 @@
 
 namespace moq2ts {
 
+namespace {
+
+QString modeName(Mpeg2tsMode mode) {
+    switch (mode) {
+    case Mpeg2tsMode::UnmodifiedProgram:
+        return QStringLiteral("unmodified-program");
+    case Mpeg2tsMode::UnmodifiedMultiplex:
+        return QStringLiteral("unmodified-multiplex");
+    case Mpeg2tsMode::PerProgram:
+        break;
+    }
+    return QStringLiteral("per-program");
+}
+
+} // namespace
+
 QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     QJsonObject mediaTrack;
     mediaTrack.insert(QStringLiteral("name"), catalog.track);
@@ -14,7 +30,7 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
         mediaTrack.insert(QStringLiteral("namespace"), catalog.namespaceName);
     }
     mediaTrack.insert(QStringLiteral("packaging"), QStringLiteral("mpeg2ts"));
-    // MSF common track fields (draft-ietf-moq-msf-00).
+    // MSF common track fields (draft-ietf-moq-msf-01).
     mediaTrack.insert(QStringLiteral("isLive"), catalog.isLive);
     mediaTrack.insert(QStringLiteral("role"), catalog.role);
     mediaTrack.insert(QStringLiteral("mimeType"), catalog.mimeType);
@@ -27,42 +43,37 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     }
     // MSFTS mpeg2ts-specific fields (draft-gregoire-moq-msfts).
     mediaTrack.insert(QStringLiteral("mpeg2tsPacketSize"), catalog.packetSize);
-    // mpeg2tsMode is required and names one of six carriage modes; this
-    // encoder only ever produces the two source-packet modes that need no PID
-    // filtering knowledge on the wire (unmodified-multiplex, per-program).
-    if (catalog.wholeMultiplex) {
-        // Whole-multiplex mode: the publisher selects no program, so
-        // mpeg2tsProgramNumber, mpeg2tsPcrPid, mpeg2tsMuxRate, and
-        // mpeg2tsSiPids MUST be absent.
-        mediaTrack.insert(QStringLiteral("mpeg2tsMode"), QStringLiteral("unmodified-multiplex"));
-    } else {
-        mediaTrack.insert(QStringLiteral("mpeg2tsMode"), QStringLiteral("per-program"));
+    // mpeg2tsMode is required (draft-gregoire-moq-msfts).
+    mediaTrack.insert(QStringLiteral("mpeg2tsMode"), modeName(catalog.mode));
+    // In unmodified-multiplex the publisher selects no program, so
+    // mpeg2tsProgramNumber, mpeg2tsPcrPid, mpeg2tsMuxRate, and mpeg2tsSiPids
+    // MUST be absent. The other modes describe one program.
+    if (catalog.mode != Mpeg2tsMode::UnmodifiedMultiplex) {
         mediaTrack.insert(QStringLiteral("mpeg2tsProgramNumber"), catalog.programNumber);
         if (catalog.pcrPid >= 0) {
             mediaTrack.insert(QStringLiteral("mpeg2tsPcrPid"), catalog.pcrPid);
         }
-        // Advisory source constant mux rate; MUST be absent in
-        // unmodified-multiplex mode.
+        // Advisory source constant mux rate.
         if (catalog.mpeg2tsMuxRateBps > 0) {
             mediaTrack.insert(QStringLiteral("mpeg2tsMuxRate"), catalog.mpeg2tsMuxRateBps);
         }
-        // mpeg2tsSiPids: PIDs of SI tables retained in the filtered track
-        // beyond those the PMT lists. Advisory; MUST be absent in
-        // unmodified-multiplex mode.
-        if (!catalog.siPids.isEmpty()) {
-            QJsonArray siPids;
-            for (int pid : catalog.siPids) {
-                siPids.append(pid);
-            }
-            mediaTrack.insert(QStringLiteral("mpeg2tsSiPids"), siPids);
+    }
+    // mpeg2tsSiPids: PIDs of SI tables that a per-program track retains beyond
+    // those the PMT lists. Advisory.
+    if (catalog.mode == Mpeg2tsMode::PerProgram && !catalog.siPids.isEmpty()) {
+        QJsonArray siPids;
+        for (int pid : catalog.siPids) {
+            siPids.append(pid);
         }
+        mediaTrack.insert(QStringLiteral("mpeg2tsSiPids"), siPids);
     }
     // mpeg2tsTimestampMode is only valid for 192-octet source packets
     // (draft-gregoire-moq-msfts); it MUST NOT be present for 188.
     if (catalog.packetSize == 192 && !catalog.timestampMode.isEmpty()) {
         mediaTrack.insert(QStringLiteral("mpeg2tsTimestampMode"), catalog.timestampMode);
     }
-    // Only advertised when every group begins at a random-access point.
+    // Only advertised when the first Object of every Group contains a random
+    // access point.
     if (catalog.randomAccess) {
         mediaTrack.insert(QStringLiteral("mpeg2tsRandomAccess"), true);
     }
@@ -86,15 +97,16 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     tracks.append(mediaTrack);
 
     if (!catalog.timelineTrack.isEmpty()) {
-        // MSF media timeline track (draft-ietf-moq-msf-00 Section 7.2): identified
-        // by type "mediatimeline", a "depends" list of the track names it applies
-        // to, and an application/json mime type.
+        // MSF media timeline track (draft-ietf-moq-msf-01 Section 7.2): identified
+        // by packaging "mediatimeline" (Table 3), a "depends" list of the track
+        // names it applies to, and an application/json mime type. Section 7.2
+        // says 'type', but MSF defines no such field (moq-wg/msf#213).
         QJsonObject timelineTrack;
         timelineTrack.insert(QStringLiteral("name"), catalog.timelineTrack);
         if (!catalog.namespaceName.isEmpty()) {
             timelineTrack.insert(QStringLiteral("namespace"), catalog.namespaceName);
         }
-        timelineTrack.insert(QStringLiteral("type"), QStringLiteral("mediatimeline"));
+        timelineTrack.insert(QStringLiteral("packaging"), QStringLiteral("mediatimeline"));
         QJsonArray depends;
         depends.append(catalog.track);
         timelineTrack.insert(QStringLiteral("depends"), depends);
@@ -113,6 +125,8 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
         // SHOULD NOT be included when isLive is false (MSF 5.1.6).
         root.insert(QStringLiteral("generatedAt"), catalog.generatedAtMs);
     }
+    root.insert(QStringLiteral("tracks"), tracks);
+    QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Compact);
     if (!catalog.initData.isEmpty()) {
         // MSF 5.1.7: each entry is {id, type, data}; MSFTS fixes type to
         // "inline" and requires the decoded data to be whole source packets, which
@@ -123,10 +137,29 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
         initEntry.insert(QStringLiteral("data"), QString::fromLatin1(catalog.initData.toBase64()));
         QJsonArray initDataList;
         initDataList.append(initEntry);
-        root.insert(QStringLiteral("initDataList"), initDataList);
+        // MSF 5.1.7: the list MUST be located after the tracks array.
+        // QJsonObject keeps its keys sorted, which would put "initDataList"
+        // first, so the list is appended to the serialized root instead.
+        Q_ASSERT(json.endsWith('}'));
+        json.chop(1);
+        json += ",\"initDataList\":" + QJsonDocument(initDataList).toJson(QJsonDocument::Compact) + '}';
     }
-    root.insert(QStringLiteral("tracks"), tracks);
-    return QJsonDocument(root).toJson(QJsonDocument::Compact);
+    return json;
+}
+
+QByteArray MsftsMuxer::mediaTimelineRecord(std::uint64_t mediaTimeUs,
+                                           std::uint64_t groupId,
+                                           std::uint64_t objectId,
+                                           std::uint64_t wallclockUnixUs) {
+    QJsonArray location;
+    location.append(static_cast<qint64>(groupId));
+    location.append(static_cast<qint64>(objectId));
+
+    QJsonArray record;
+    record.append(static_cast<qint64>(mediaTimeUs / 1000ULL));
+    record.append(location);
+    record.append(static_cast<qint64>(wallclockUnixUs / 1000ULL));
+    return QJsonDocument(record).toJson(QJsonDocument::Compact);
 }
 
 bool MsftsMuxer::catalogFromJson(const QByteArray& json,
@@ -196,24 +229,27 @@ bool MsftsMuxer::catalogFromJson(const QByteArray& json,
         parsed.namespaceName = track.value(QStringLiteral("namespace")).toString();
         parsed.packetSize = track.value(QStringLiteral("mpeg2tsPacketSize"))
                                  .toInt(track.value(QStringLiteral("m2tsPacketSize")).toInt(188));
-        // The draft names this field mpeg2tsMode ("unmodified-multiplex" or
-        // "per-program" for the modes this parser understands); accept the
-        // legacy m2tsMpts/m2tsTransparent booleans as a fallback so catalogs
-        // from older publishers still parse.
-        // The other draft modes (es-packets, es-units, media-frames) carry
-        // payloads that are not TS packets, so reading them as per-program
-        // would yield garbage; skip such tracks instead.
+        // The draft names this field mpeg2tsMode. This parser reads the three
+        // modes whose Objects carry the TS packets of a program or a multiplex;
+        // accept the legacy m2tsMpts/m2tsTransparent booleans as a fallback so
+        // catalogs from older publishers still parse.
+        // An es-packets track carries one PID only and cannot be read as a
+        // program; skip such tracks, and any unknown mode, instead.
         const QString mode = track.value(QStringLiteral("mpeg2tsMode")).toString();
-        if (mode == QStringLiteral("unmodified-multiplex")) {
-            parsed.wholeMultiplex = true;
+        if (mode == QStringLiteral("unmodified-program")) {
+            parsed.mode = Mpeg2tsMode::UnmodifiedProgram;
+        } else if (mode == QStringLiteral("unmodified-multiplex")) {
+            parsed.mode = Mpeg2tsMode::UnmodifiedMultiplex;
         } else if (mode == QStringLiteral("per-program")) {
-            parsed.wholeMultiplex = false;
+            parsed.mode = Mpeg2tsMode::PerProgram;
         } else if (!mode.isEmpty()) {
             unsupportedMode = mode;
             continue;
         } else {
-            parsed.wholeMultiplex = track.value(QStringLiteral("m2tsMpts"))
-                                  .toBool(track.value(QStringLiteral("m2tsTransparent")).toBool(false));
+            const bool legacyWholeMultiplex = track.value(QStringLiteral("m2tsMpts"))
+                .toBool(track.value(QStringLiteral("m2tsTransparent")).toBool(false));
+            parsed.mode = legacyWholeMultiplex ? Mpeg2tsMode::UnmodifiedMultiplex
+                                               : Mpeg2tsMode::PerProgram;
         }
         parsed.programNumber = track.value(QStringLiteral("mpeg2tsProgramNumber"))
                                     .toInt(track.value(QStringLiteral("m2tsProgramNumber")).toInt(0));
@@ -265,7 +301,7 @@ bool MsftsMuxer::catalogFromJson(const QByteArray& json,
 
     if (!unsupportedMode.isEmpty()) {
         return fail(QStringLiteral("Unsupported mpeg2tsMode \"%1\" (expected "
-                                   "unmodified-multiplex or per-program).")
+                                   "unmodified-program, unmodified-multiplex, or per-program).")
                         .arg(unsupportedMode));
     }
     return fail(QStringLiteral("Catalog has no mpeg2ts-packaged track."));

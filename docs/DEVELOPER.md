@@ -64,15 +64,15 @@ media publishing. It currently provides:
   fields (`isLive`, `role`, `mimeType`, `targetLatency` when live, optional
   `bitrate`) and MSFTS mpeg2ts fields (`mpeg2tsMode`, `mpeg2tsPacketSize`,
   `mpeg2tsProgramNumber` and optional `mpeg2tsPcrPid` on the `per-program`
-  mode, and `mpeg2tsRandomAccess` when every group starts on a random-access
-  point).
+  and `unmodified-program` modes, and `mpeg2tsRandomAccess` when the first
+  Object of every Group contains a random access point).
 - `MsftsMuxer` also adds a `<stream>.timeline` track of MSF
-  `type: "mediatimeline"` that `depends` on the media track.
+  `packaging: "mediatimeline"` that `depends` on the media track.
 - Whole source packets are grouped into MOQT Object payloads and exposed to
   `MoqxrPublisher::publishLiveObjects(...)`.
-- `LivePipeline` interleaves timeline objects at stream start and roughly once
-  per second. These timeline objects map the most recent media object to Unix
-  wall-clock time in milliseconds.
+- `LivePipeline` adds one timeline record per media Group and publishes the
+  whole record history as the first Object of the timeline Group of the same
+  number (MSF Section 7.3).
 
 ## File-level map
 
@@ -217,17 +217,14 @@ PID in the source multiplex.
 
 `MsftsMuxer::catalogJson` emits a compact MSF catalog (`draft-ietf-moq-msf-01`
 common fields plus `draft-gregoire-moq-msfts` mpeg2ts fields). This encoder
-only produces the `unmodified-multiplex` and `per-program` values of the
-required `mpeg2tsMode` field. A live capture catalog (`per-program`) looks
-like:
+produces the `unmodified-program`, `unmodified-multiplex`, and `per-program`
+values of the required `mpeg2tsMode` field, and never `es-packets`. A live
+capture catalog (`per-program`) looks like:
 
 ```json
 {
   "version": "draft-01",
   "generatedAt": 1779416505123,
-  "initDataList": [
-    { "id": "init-program-1", "type": "inline", "data": "R0AAEAAAs...==" }
-  ],
   "tracks": [
     {
       "name": "program-1",
@@ -245,15 +242,20 @@ like:
     },
     {
       "name": "program-1.timeline",
-      "type": "mediatimeline",
+      "packaging": "mediatimeline",
       "depends": ["program-1"],
       "mimeType": "application/json"
     }
+  ],
+  "initDataList": [
+    { "id": "init-program-1", "type": "inline", "data": "R0AAEAAAs...==" }
   ]
 }
 ```
 
-An `unmodified-multiplex` (`--transparent`) track omits
+An `--unmodified` track is `unmodified-program` when the source PAT lists one
+program. It then carries `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` like a
+`per-program` track. Otherwise it is `unmodified-multiplex`, which omits
 `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, and
 `mpeg2tsSiPids` — the draft requires them absent when the publisher selects
 no program.
@@ -266,19 +268,20 @@ Field presence is conditional:
   is the inverse — VOD only, present only when `isLive` is false and the value is
   positive (MSF 5.1.37).
 - `bitrate` is emitted only when greater than zero.
-- `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, and
-  `mpeg2tsSiPids` are emitted only in `per-program` mode; `mpeg2tsPcrPid` is
-  further gated on being known (PID >= 0).
+- `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, and `mpeg2tsMuxRate` are emitted
+  in every mode except `unmodified-multiplex`; `mpeg2tsPcrPid` is further
+  gated on being known (PID >= 0), and `mpeg2tsMuxRate` on being positive.
+- `mpeg2tsSiPids` is emitted only in `per-program` mode.
 - `mpeg2tsTimestampMode` is valid only for 192-octet source packets and MUST
   NOT appear for 188.
-- `mpeg2tsRandomAccess` is advertised only when every MOQT group begins at a
-  random-access point.
+- `mpeg2tsRandomAccess` is advertised only when the first Object of every
+  Group contains a random access point.
 
 ## Timeline track
 
 The timeline track is separate from the M2TS media track so media object payloads
 remain draft-MSFTS-clean. It is an MSF media timeline track
-(`draft-ietf-moq-msf-00` Section 7.2): MSF `type: "mediatimeline"`, a `depends`
+(`draft-ietf-moq-msf-01` Section 7.2): MSF `packaging: "mediatimeline"`, a `depends`
 list naming the media track(s) it applies to, and an `application/json` MIME
 type (see the catalog example above).
 
@@ -290,10 +293,19 @@ records, where each record is a three-item array
 ```
 
 with the items being `mediaPresentationTimeMs`, `[groupId, objectId]`, and
-`wallclockMs` (milliseconds since the Unix epoch, `0` when unknown). A single
-timeline object carries one record. `LivePipeline` emits one at stream start and
-then roughly once per second (every `1000 / fragmentDurationMs` media objects),
-mapping the most recent media object's presentation time to wall-clock time.
+`wallclockMs` (milliseconds since the Unix epoch), each the floor in integral
+milliseconds (MSF Section 7.1.1).
+
+`LivePipeline` adds one record per media Group. The record points at the first
+Object of the Group that starts a video PES, and carries that PES's PTS. The
+capture path reads the PTS from its own muxed bytes. The wallclock time is the publish
+time on a live source and `0` on a VOD file.
+
+MSF Section 7.3 makes the first Object of each timeline Group an independent
+timeline. The timeline track therefore publishes one Object per media Group, in
+the Group of the same number, and that Object carries every record so far. The
+history grows for the length of a session, so moq2ts suits limited-time runs
+until MSF defines how to trim it (moq-wg/msf#205).
 
 ## Runtime operational guidance
 
