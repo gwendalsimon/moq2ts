@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <utility>
 
@@ -115,6 +116,28 @@ inline QByteArray psiPacket(int pid, const QByteArray& section, int continuityCo
     payload.append(char(0x00));
     payload.append(section);
     return tsPacket(pid, true, payload, continuityCounter);
+}
+
+// A section split over as many packets as it needs: pointer_field 0 in the
+// first packet, then continuation packets, padded with 0xFF.
+inline QList<QByteArray> psiPackets(int pid, const QByteArray& section, int firstContinuityCounter = 0) {
+    QList<QByteArray> packets;
+    QByteArray rest = section;
+    int cc = firstContinuityCounter;
+    bool first = true;
+    while (first || !rest.isEmpty()) {
+        QByteArray payload;
+        if (first) {
+            payload.append(char(0x00));
+        }
+        const int room = 184 - static_cast<int>(payload.size());
+        payload.append(rest.left(room));
+        rest.remove(0, std::min<qsizetype>(room, rest.size()));
+        packets.append(tsPacket(pid, first, payload, cc));
+        cc = (cc + 1) & 0x0F;
+        first = false;
+    }
+    return packets;
 }
 
 // The start of a video PES packet with a PTS (33 bits, 90 kHz).

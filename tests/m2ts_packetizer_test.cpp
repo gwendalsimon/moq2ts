@@ -74,6 +74,27 @@ int main() {
                      "transparent SPTS describes its own program");
     }
 
+    // initData holds every packet of a PMT that spans several packets.
+    {
+        QList<std::pair<int, int>> streams{{0x1B, 0x100}};
+        for (int index = 0; index < 99; ++index) {
+            streams.append({0x06, 0x200 + index});
+        }
+        const QByteArray pat = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        const QList<QByteArray> pmt = tb::psiPackets(0x1000, tb::pmtSection(1, 0x100, streams));
+        QByteArray ts = pat;
+        for (const QByteArray& packet : pmt) {
+            ts += packet;
+        }
+        ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        const QString path = dir.filePath("long-pmt.ts");
+        ok &= expect(writeFile(path, ts) && pmt.size() == 3, "write long-PMT stream");
+        M2tsPacketizer packetizer(path);
+        QString error;
+        ok &= expect(packetizer.open(0, &error), "long PMT opens: " + error.toStdString());
+        ok &= expect(packetizer.initData() == ts.left(4 * 188), "initData holds the PAT and all three PMT packets");
+    }
+
     // Object media time: the PTS of the first video PES in each Object, on the
     // PMT's video PID even when an audio PES comes first and the PCR has its own
     // PID. Two packets per Object.

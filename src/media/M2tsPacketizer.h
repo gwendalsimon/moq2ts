@@ -9,6 +9,7 @@
 #include <optional>
 #include <set>
 #include <utility>
+#include <vector>
 
 namespace moq2ts {
 
@@ -26,6 +27,37 @@ struct M2tsObject {
     // microseconds, unwrapped past the 33-bit range. Empty when no video PES
     // starts in it.
     std::optional<std::uint64_t> ptsUs;
+};
+
+// MPEG-2 CRC_32 (ISO/IEC 13818-1 Annex A) of size octets.
+std::uint32_t mpegCrc32(const char* data, qsizetype size);
+
+// Reassembles the PSI sections of one PID (ISO/IEC 13818-1 Section 2.4.4). It
+// follows the pointer_field, joins a section across packets, and reads several
+// sections from one packet. It drops a section with a bad CRC_32, and a partial
+// section when the continuity counter shows a lost packet.
+class PsiAssembler {
+public:
+    struct Section {
+        QByteArray bytes;                  // table_id through CRC_32
+        QList<QByteArray> sourcePackets;   // the packets that carried it, in order
+    };
+
+    // Feeds one 188-octet TS packet and the source packet it came from (188 or
+    // 192 octets). Returns the sections that this packet completes.
+    QList<Section> push(const QByteArray& tsPacket, const QByteArray& sourcePacket);
+    void reset();
+
+private:
+    // Appends to the section in progress and stops at its end. Returns the
+    // octets used.
+    int append(const char* data, int size, const QByteArray& sourcePacket, QList<Section>* done);
+
+    QByteArray m_section;
+    QList<QByteArray> m_packets;
+    bool m_collecting = false;
+    bool m_packetRecorded = false;   // the current packet is in m_packets
+    int m_lastCc = -1;
 };
 
 // PTS of a PES packet that starts in a 188-octet TS packet, in 90 kHz units.
@@ -79,8 +111,13 @@ public:
 
 private:
     bool detectPacketSize(QString* error);
-    bool collectInitData(QString* error);
-    bool identifyVideoPid(QString* error);
+    // Reads up to 4096 packets for the PAT and the selected program's PMT.
+    bool scanPsi(QString* error);
+    void handlePsiPacket(const QByteArray& tsPacket, const QByteArray& sourcePacket);
+    void onPat(const PsiAssembler::Section& section);
+    void onPmt(const PsiAssembler::Section& section);
+    // Per-program carriage: the PIDs to keep, and initData.
+    bool selectProgramPids(QString* error);
     bool packetHasSync(const QByteArray& packet) const;
     QByteArray tsPacketView(const QByteArray& sourcePacket) const;
     bool hasRandomAccessIndicator(const QByteArray& tsPacket) const;
@@ -96,6 +133,15 @@ private:
     // First video elementary PID of the PMT; the PTS source for Object media time.
     int m_videoPid = -1;
     PtsUnwrapper m_ptsUnwrapper;
+
+    // Current PSI of the source: the last PAT, the last PMT of the selected
+    // program, and what they list.
+    PsiAssembler m_patAssembler;
+    PsiAssembler m_pmtAssembler;
+    PsiAssembler::Section m_pat;
+    PsiAssembler::Section m_pmt;
+    std::vector<std::pair<int, int>> m_patPrograms;
+    std::set<int> m_elementaryPids;
     std::set<int> m_selectedPids;
     QByteArray m_initData;
     std::uint64_t m_nextObjectId = 0;
