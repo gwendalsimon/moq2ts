@@ -306,7 +306,7 @@ void LivePipeline::runLoop() {
         .timelineTrack = timelineTrackName,
         .namespaceName = m_config.namespaceName,
         .trackDurationMs = fileDurationMs,
-        .randomAccess = true,
+        .randomAccess = packetizer.randomAccess(),
         // Unmodified carriage: unmodified-program for a one-program PAT,
         // unmodified-multiplex otherwise (an unparsed PAT counts as a multiplex).
         .mode = !m_config.transparentMode             ? Mpeg2tsMode::PerProgram
@@ -327,11 +327,6 @@ void LivePipeline::runLoop() {
         // it is set here rather than in the initializer above. The capture path
         // already sets it; this is the path production uses.
         catalogSpec.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
-    }
-    if (m_config.transparentMode) {
-        // Transparent mode now detects random_access_indicator in TS adaptation
-        // fields and starts new groups at those points (MSFTS Section 6.3). Groups begin
-        // at RAP when the source signals RAI; leave randomAccess true.
     }
     const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
 

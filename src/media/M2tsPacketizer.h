@@ -100,6 +100,9 @@ public:
     // m2tsSiPids: PIDs retained in the filtered track beyond those in the PMT.
     QList<int> retainedSiPids() const;
     QByteArray initData() const;
+    // True when the first Object of every Group contains a random access point,
+    // which the catalog then declares as mpeg2tsRandomAccess. Valid after open().
+    bool randomAccess() const;
     std::uint64_t objectsRead() const;
     // True when the source is a non-seekable stream (FIFO, pipe, /dev/stdin),
     // i.e. a live feed rather than a seekable VOD file. Valid after open().
@@ -127,6 +130,8 @@ private:
     bool packetHasSync(const QByteArray& packet) const;
     QByteArray tsPacketView(const QByteArray& sourcePacket) const;
     bool hasRandomAccessIndicator(const QByteArray& tsPacket) const;
+    // True for the first TS packet of a random access point on the group PID.
+    bool startsRandomAccess(int pid, const QByteArray& tsPacket);
 
     QString m_sourcePath;
     QFile m_file;
@@ -161,6 +166,10 @@ private:
     int m_openProgramCount = 0;   // PAT programs at open(), which set the mode
     bool m_ended = false;
     QString m_endReason;
+
+    // A live track drops the packets before its first random access point.
+    bool m_dropLeadIn = false;
+    bool m_leadInDropped = false;
     std::set<int> m_selectedPids;
     QByteArray m_initData;
     std::uint64_t m_nextObjectId = 0;
