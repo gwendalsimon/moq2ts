@@ -107,8 +107,9 @@ int main() {
     {
         MsftsCatalog parsed;
         QString error;
-        const bool accepted = MsftsMuxer::catalogFromJson(MsftsMuxer::catalogJson(baseCatalog(Mpeg2tsMode::EsPackets)),
-                                                          &parsed, nullptr, &error);
+        const QByteArray esPackets = R"({"version":"draft-01","tracks":[{"name":"video","packaging":"mpeg2ts",)"
+                                     R"("mpeg2tsMode":"es-packets","mpeg2tsPacketSize":188,"mpeg2tsEsPid":256}]})";
+        const bool accepted = MsftsMuxer::catalogFromJson(esPackets, &parsed, nullptr, &error);
         ok &= expect(!accepted && error.contains("es-packets"), "es-packets track is skipped");
     }
 

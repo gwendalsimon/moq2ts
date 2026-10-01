@@ -16,9 +16,7 @@ QString modeName(Mpeg2tsMode mode) {
     case Mpeg2tsMode::UnmodifiedMultiplex:
         return QStringLiteral("unmodified-multiplex");
     case Mpeg2tsMode::PerProgram:
-        return QStringLiteral("per-program");
-    case Mpeg2tsMode::EsPackets:
-        return QStringLiteral("es-packets");
+        break;
     }
     return QStringLiteral("per-program");
 }
@@ -45,7 +43,7 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     }
     // MSFTS mpeg2ts-specific fields (draft-gregoire-moq-msfts).
     mediaTrack.insert(QStringLiteral("mpeg2tsPacketSize"), catalog.packetSize);
-    // mpeg2tsMode is required and names one of four carriage modes.
+    // mpeg2tsMode is required (draft-gregoire-moq-msfts).
     mediaTrack.insert(QStringLiteral("mpeg2tsMode"), modeName(catalog.mode));
     // In unmodified-multiplex the publisher selects no program, so
     // mpeg2tsProgramNumber, mpeg2tsPcrPid, mpeg2tsMuxRate, and mpeg2tsSiPids

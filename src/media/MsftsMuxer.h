@@ -8,12 +8,13 @@
 
 namespace moq2ts {
 
-// The four values of mpeg2tsMode (draft-gregoire-moq-msfts).
+// The values of mpeg2tsMode (draft-gregoire-moq-msfts) whose Objects carry the
+// TS packets of a program or a multiplex. The fourth value, es-packets, needs
+// mpeg2tsEsPid, which this encoder does not produce; the parser skips it.
 enum class Mpeg2tsMode {
     UnmodifiedProgram,
     UnmodifiedMultiplex,
     PerProgram,
-    EsPackets,
 };
 
 struct MsftsCatalog {
@@ -51,8 +52,7 @@ struct MsftsCatalog {
     // Advertised as mpeg2tsMode (draft-gregoire-moq-msfts). The two unmodified
     // modes carry the source verbatim: UnmodifiedProgram when its PAT lists one
     // program, UnmodifiedMultiplex otherwise. PerProgram is a program derived by
-    // filtering. This encoder never produces EsPackets; the parser recognizes it
-    // only to skip such tracks.
+    // filtering.
     Mpeg2tsMode mode = Mpeg2tsMode::PerProgram;
     // Advisory source constant mux rate in bits/s. Emitted as mpeg2tsMuxRate
     // only when > 0 and the mode is not UnmodifiedMultiplex.
