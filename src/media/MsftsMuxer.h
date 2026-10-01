@@ -45,8 +45,8 @@ struct MsftsCatalog {
     // VOD-only track duration in integer milliseconds (MSF 5.1.37); emitted only
     // when isLive is false and the value is > 0.
     qint64 trackDurationMs = 0;
-    // When true, advertise mpeg2tsRandomAccess (draft-gregoire-moq-msfts): every
-    // MOQT group begins at a random-access point.
+    // When true, advertise mpeg2tsRandomAccess (draft-gregoire-moq-msfts): the
+    // first Object of every MOQT Group contains a random access point.
     bool randomAccess = false;
 
     // Advertised as mpeg2tsMode (draft-gregoire-moq-msfts). The two unmodified
@@ -58,7 +58,7 @@ struct MsftsCatalog {
     // only when > 0 and the mode is not UnmodifiedMultiplex.
     qint64 mpeg2tsMuxRateBps = 0;
 
-    // MSF common track/root fields (draft-ietf-moq-msf-00).
+    // MSF common track/root fields (draft-ietf-moq-msf-01).
     bool isLive = true;
     int targetLatencyMs = 1000;
     QString role = QStringLiteral("video");

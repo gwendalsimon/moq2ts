@@ -64,8 +64,8 @@ media publishing. It currently provides:
   fields (`isLive`, `role`, `mimeType`, `targetLatency` when live, optional
   `bitrate`) and MSFTS mpeg2ts fields (`mpeg2tsMode`, `mpeg2tsPacketSize`,
   `mpeg2tsProgramNumber` and optional `mpeg2tsPcrPid` on the `per-program`
-  and `unmodified-program` modes, and `mpeg2tsRandomAccess` when every group starts on a random-access
-  point).
+  and `unmodified-program` modes, and `mpeg2tsRandomAccess` when the first
+  Object of every Group contains a random access point).
 - `MsftsMuxer` also adds a `<stream>.timeline` track of MSF
   `packaging: "mediatimeline"` that `depends` on the media track.
 - Whole source packets are grouped into MOQT Object payloads and exposed to
@@ -218,8 +218,8 @@ PID in the source multiplex.
 `MsftsMuxer::catalogJson` emits a compact MSF catalog (`draft-ietf-moq-msf-01`
 common fields plus `draft-gregoire-moq-msfts` mpeg2ts fields). This encoder
 produces the `unmodified-program`, `unmodified-multiplex`, and `per-program`
-values of the required `mpeg2tsMode` field, and never `es-packets`. A live capture catalog (`per-program`) looks
-like:
+values of the required `mpeg2tsMode` field, and never `es-packets`. A live
+capture catalog (`per-program`) looks like:
 
 ```json
 {
@@ -274,8 +274,8 @@ Field presence is conditional:
 - `mpeg2tsSiPids` is emitted only in `per-program` mode.
 - `mpeg2tsTimestampMode` is valid only for 192-octet source packets and MUST
   NOT appear for 188.
-- `mpeg2tsRandomAccess` is advertised only when every MOQT group begins at a
-  random-access point.
+- `mpeg2tsRandomAccess` is advertised only when the first Object of every
+  Group contains a random access point.
 
 ## Timeline track
 
@@ -304,7 +304,8 @@ time on a live source and `0` on a VOD file.
 MSF Section 7.3 makes the first Object of each timeline Group an independent
 timeline. The timeline track therefore publishes one Object per media Group, in
 the Group of the same number, and that Object carries every record so far. The
-history has no bound yet; moq-wg/msf#205 discusses one.
+history grows for the length of a session, so moq2ts suits limited-time runs
+until MSF defines how to trim it (moq-wg/msf#205).
 
 ## Runtime operational guidance
 

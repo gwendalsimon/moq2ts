@@ -25,11 +25,9 @@ std::uint64_t nowUnixUs() {
 // latency stays near zero; only objects arriving ahead of their media time wait.
 constexpr std::int64_t kPaceSlackUs = 8000;
 
-// Adds the record of a media Group to the timeline history, and returns the
-// Object that opens the timeline Group of the same number. MSF -01 Section 7.3
-// makes that first Object an independent timeline, holding every record so far,
-// so a subscriber joining at any Group boundary gets the whole history. The
-// history has no bound yet (see moq-wg/msf#205).
+// Adds the record of a media Group and returns Object 0 of the timeline Group
+// of the same number, which holds every accessible record (MSF -01 Section
+// 7.3). The history has no bound yet (moq-wg/msf#205).
 PublishedObject timelineObject(PublishState* st,
                                const QString& timelineTrackName,
                                const PublishedObject& media,

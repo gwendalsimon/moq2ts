@@ -30,7 +30,7 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
         mediaTrack.insert(QStringLiteral("namespace"), catalog.namespaceName);
     }
     mediaTrack.insert(QStringLiteral("packaging"), QStringLiteral("mpeg2ts"));
-    // MSF common track fields (draft-ietf-moq-msf-00).
+    // MSF common track fields (draft-ietf-moq-msf-01).
     mediaTrack.insert(QStringLiteral("isLive"), catalog.isLive);
     mediaTrack.insert(QStringLiteral("role"), catalog.role);
     mediaTrack.insert(QStringLiteral("mimeType"), catalog.mimeType);
@@ -72,7 +72,8 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     if (catalog.packetSize == 192 && !catalog.timestampMode.isEmpty()) {
         mediaTrack.insert(QStringLiteral("mpeg2tsTimestampMode"), catalog.timestampMode);
     }
-    // Only advertised when every group begins at a random-access point.
+    // Only advertised when the first Object of every Group contains a random
+    // access point.
     if (catalog.randomAccess) {
         mediaTrack.insert(QStringLiteral("mpeg2tsRandomAccess"), true);
     }
@@ -136,9 +137,10 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
         initEntry.insert(QStringLiteral("data"), QString::fromLatin1(catalog.initData.toBase64()));
         QJsonArray initDataList;
         initDataList.append(initEntry);
-        // MSF 5.1.7 also says the list MUST be located after the tracks array.
+        // MSF 5.1.7: the list MUST be located after the tracks array.
         // QJsonObject keeps its keys sorted, which would put "initDataList"
         // first, so the list is appended to the serialized root instead.
+        Q_ASSERT(json.endsWith('}'));
         json.chop(1);
         json += ",\"initDataList\":" + QJsonDocument(initDataList).toJson(QJsonDocument::Compact) + '}';
     }
@@ -231,8 +233,8 @@ bool MsftsMuxer::catalogFromJson(const QByteArray& json,
         // modes whose Objects carry the TS packets of a program or a multiplex;
         // accept the legacy m2tsMpts/m2tsTransparent booleans as a fallback so
         // catalogs from older publishers still parse.
-        // An es-packets track carries one PID only, so reading it as a program
-        // would yield garbage; skip such tracks, and any unknown mode, instead.
+        // An es-packets track carries one PID only and cannot be read as a
+        // program; skip such tracks, and any unknown mode, instead.
         const QString mode = track.value(QStringLiteral("mpeg2tsMode")).toString();
         if (mode == QStringLiteral("unmodified-program")) {
             parsed.mode = Mpeg2tsMode::UnmodifiedProgram;

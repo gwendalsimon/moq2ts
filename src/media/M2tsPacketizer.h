@@ -16,8 +16,8 @@ struct M2tsObject {
     QByteArray payload;
     std::uint64_t groupId = 0;
     std::uint64_t objectId = 0;
-    // True when this object is the first of a new MOQT group (begins at a
-    // random-access point). Always false for the file-source path.
+    // True when this object is the first of a new MOQT group, which means it
+    // contains a random access point.
     bool startsGroup = false;
     // Media time (microseconds, capture-epoch relative) of the most recent video
     // frame whose bytes are in this object. 0 for the file-source path.
