@@ -110,6 +110,16 @@ int main() {
         }
     }
 
+    // A looped source steps the PTS back; the unwrapped value never goes back by
+    // more than the B-frame reordering allowance.
+    {
+        moq2ts::PtsUnwrapper unwrapper;
+        ok &= expect(unwrapper.unwrap(1000000) == 1000000, "unwrap: first value");
+        ok &= expect(unwrapper.unwrap(997000) == 997000, "unwrap: B-frame step back kept");
+        ok &= expect(unwrapper.unwrap(9000) == 997000, "unwrap: loop does not go back");
+        ok &= expect(unwrapper.unwrap(12003) == 1000003, "unwrap: media time continues after the loop");
+    }
+
     if (ok) {
         std::cout << "m2ts packetizer tests passed\n";
     }

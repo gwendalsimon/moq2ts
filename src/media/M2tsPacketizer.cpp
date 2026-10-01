@@ -168,9 +168,17 @@ std::int64_t pesPts(const QByteArray& tsPacket) {
 
 std::uint64_t PtsUnwrapper::unwrap(std::int64_t pts) {
     // The PTS wraps at 2^33. A step back of more than half that range is a wrap.
+    // A shorter step back of more than 5 seconds is a discontinuity, as in a
+    // looped file; B-frame reordering steps back by far less. The offset then
+    // absorbs the step, so the output never goes back.
     constexpr std::int64_t kPtsRange = std::int64_t{1} << 33;
+    constexpr std::int64_t kMaxStepBack = 5 * 90000;
     if (m_lastPts >= 0 && pts + kPtsRange / 2 < m_lastPts) {
         m_offset += static_cast<std::uint64_t>(kPtsRange);
+    } else if (m_lastPts >= 0 && pts + kMaxStepBack < m_lastPts) {
+        qWarning("PTS discontinuity: %lld after %lld (90 kHz); media time continues from the last value.",
+                 static_cast<long long>(pts), static_cast<long long>(m_lastPts));
+        m_offset += static_cast<std::uint64_t>(m_lastPts - pts);
     }
     m_lastPts = pts;
     return m_offset + static_cast<std::uint64_t>(pts);

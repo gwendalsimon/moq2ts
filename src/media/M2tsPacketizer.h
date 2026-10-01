@@ -32,7 +32,8 @@ struct M2tsObject {
 // Returns -1 when the packet starts no PES packet or the header carries no PTS.
 std::int64_t pesPts(const QByteArray& tsPacket);
 
-// Turns successive 33-bit PTS values into one 64-bit count that does not wrap.
+// Turns successive 33-bit PTS values into one 64-bit count that does not wrap
+// and does not step back by more than 5 seconds.
 class PtsUnwrapper {
 public:
     std::uint64_t unwrap(std::int64_t pts);
