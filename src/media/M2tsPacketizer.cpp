@@ -783,8 +783,8 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             }
             // One rewritten PAT packet takes the place of the packet that starts
             // section 0 of each source PAT, which keeps the source repetition
-            // rate. The other packets of a long source PAT go. PID 0 gets its own continuity
-            // counter.
+            // rate. The other packets of a long source PAT go. PID 0 gets its
+            // own continuity counter.
             if (pid == 0x0000) {
                 if (!payloadUnitStart(tsView) || startingSectionNumber(tsView) > 0) {
                     --index;
