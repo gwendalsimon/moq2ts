@@ -135,6 +135,8 @@ private:
     bool packetHasSync(const QByteArray& packet) const;
     QByteArray tsPacketView(const QByteArray& sourcePacket) const;
     bool hasRandomAccessIndicator(const QByteArray& tsPacket) const;
+    // Live source: whether a random access point comes within the look-ahead.
+    bool findRandomAccess();
     // True for the first TS packet of a random access point on the group PID.
     bool startsRandomAccess(int pid, const QByteArray& tsPacket);
 

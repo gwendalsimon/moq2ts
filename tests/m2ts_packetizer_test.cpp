@@ -351,6 +351,17 @@ int main() {
         ok &= expect(packetizer.readObject(1, &object, &error) && moq2ts::test::pidOfFirst(object.payload) == 0,
                      "file: byte 0 kept");
 
+        // A live source whose encoder never sets random_access_indicator is
+        // published from its first packet, without random access.
+        QByteArray noIndicator = single;
+        noIndicator[3 * 188 + 5] = static_cast<char>(static_cast<unsigned char>(noIndicator[3 * 188 + 5]) & ~0x40);
+        for (const bool transparent : {false, true}) {
+            const LiveRun live = publishLive(dir.filePath(transparent ? "no-rai-u.fifo" : "no-rai-p.fifo"), noIndicator, transparent);
+            ok &= expect(!live.randomAccess && live.run.packets.size() == 5 && live.run.error.isEmpty(),
+                         std::string(transparent ? "unmodified" : "per-program") +
+                             " live source without indicator: published from its first packet, no random access");
+        }
+
         const QByteArray multiplex = stream({{1, 0x1000}, {2, 0x1001}});
         const LiveRun live = publishLive(dir.filePath("live-m.fifo"), multiplex, true);
         ok &= expect(!live.randomAccess && live.run.packets.size() == 5 && live.initData.isEmpty(),

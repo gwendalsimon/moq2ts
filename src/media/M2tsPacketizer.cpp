@@ -328,12 +328,11 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
         refreshInitData();
     }
     m_initDataChanged = false;
-    // Decision E2 and draft "Group Boundaries": a live track drops the packets
-    // before the first random access point, so that every Group, Group 0
-    // included, starts at one. This changes where the track starts, not the
-    // packets, so the unmodified modes keep it. A file keeps byte 0. A
-    // multiplex is left alone, because its indicator comes from one program.
-    m_dropLeadIn = m_sequential && !(m_transparent && m_patProgramCount != 1);
+    // A live track drops the packets before its first random access point, so
+    // that every Group starts at one (draft "Group Boundaries"). A file keeps
+    // byte 0, and a multiplex keeps its lead-in. The random_access_indicator is
+    // optional, so the track declares random access only if one appears.
+    m_dropLeadIn = m_sequential && !(m_transparent && m_patProgramCount != 1) && findRandomAccess();
     // readObject reads the PSI again from the start, so the assemblers restart.
     // The stored tables stay, so the same tables count as repeats.
     m_patAssembler.reset();
@@ -804,6 +803,31 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     object->startsGroup = rapDetected;
     ++m_nextObjectId;
     return true;
+}
+
+bool M2tsPacketizer::findRandomAccess() {
+    // Looks ahead on a live source, up to 20,000 packets (about 2 seconds at
+    // 10 Mbit/s), for the first random access point. The packets read stay in
+    // the prebuffer, so readObject still publishes them in order.
+    constexpr int maxPackets = 20000;
+    const int savedRapPid = m_rapPid;
+    for (qsizetype offset = 0; offset < qsizetype{maxPackets} * m_packetSize; offset += m_packetSize) {
+        if (offset + m_packetSize > m_prebuffer.size()) {
+            const QByteArray packet = m_file.read(m_packetSize);
+            if (packet.size() != m_packetSize) {
+                break;
+            }
+            m_prebuffer += packet;
+        }
+        const QByteArray tsPacket = tsPacketView(m_prebuffer.mid(offset, m_packetSize));
+        if (startsRandomAccess(pidOf(tsPacket), tsPacket)) {
+            return true;
+        }
+    }
+    m_rapPid = savedRapPid;
+    qWarning("No random_access_indicator within the first %d packets of the live source; the track "
+             "starts at its first packet and does not declare mpeg2tsRandomAccess.", maxPackets);
+    return false;
 }
 
 bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
