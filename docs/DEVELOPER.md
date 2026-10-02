@@ -284,7 +284,9 @@ Field presence is conditional:
 - `mpeg2tsRandomAccess` is advertised only when the first Object of every
   Group contains a random access point. A live source (pipe, FIFO, SRT)
   drops the packets before its first random access point and declares it,
-  except for `unmodified-multiplex`. A file keeps byte 0 and does not.
+  if the source sets the random_access_indicator on its video PID (or on the
+  PCR PID without video), except for `unmodified-multiplex`. A file keeps
+  byte 0 and does not.
 
 ## Timeline track
 

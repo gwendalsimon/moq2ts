@@ -420,6 +420,35 @@ int main() {
                      "live multiplex: lead-in kept, no random access, no initData");
     }
 
+    // Group boundaries follow the video PID's random_access_indicator, also
+    // when the PCR has a PID of its own, in both modes, for a file and a live
+    // source.
+    {
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x1FF, {{0x1B, 0x100}}));
+        for (int gop = 0; gop < 3; ++gop) {
+            ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000 * gop), gop * 2, 0x40);
+            ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), gop * 2 + 1);
+        }
+        const QString path = dir.filePath("separate-pcr.ts");
+        ok &= expect(writeFile(path, ts), "write separate-PCR stream");
+        for (const bool transparent : {false, true}) {
+            const std::string label = transparent ? "separate PCR, unmodified" : "separate PCR, per-program";
+            M2tsPacketizer packetizer(path);
+            packetizer.setTransparent(transparent);
+            QString error;
+            ok &= expect(packetizer.open(0, &error), label + ": opens");
+            M2tsObject object;
+            int groups = 0;
+            while (packetizer.readObject(1, &object, &error)) {
+                groups += object.startsGroup ? 1 : 0;
+            }
+            ok &= expect(groups == 3, label + ": one Group per random access point");
+            const LiveRun live = publishLive(dir.filePath(transparent ? "sep-pcr-u.fifo" : "sep-pcr-p.fifo"), ts, transparent);
+            ok &= expect(live.randomAccess && live.firstStartsGroup, label + ", live: random access declared");
+        }
+    }
+
     // Object media time: the PTS of the first video PES in each Object, on the
     // PMT's video PID even when an audio PES comes first and the PCR has its own
     // PID. Two packets per Object.

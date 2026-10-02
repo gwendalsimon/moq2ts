@@ -333,9 +333,10 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
             *error = QString();
         }
     }
-    if (m_pcrPid >= 0) {
-        m_rapPid = m_pcrPid;
-    }
+    // Group boundaries follow the random_access_indicator of the video PID, or
+    // of the PCR PID when the PMT lists no video stream. The PCR can travel on
+    // a PID of its own, which never carries the indicator.
+    m_rapPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
     // An unmodified-program track carries its source PAT and PMT as initData,
     // so a joining subscriber can pass them to the receiver before the first
     // Object (draft "Use of MSF Initialization Data").
@@ -573,9 +574,7 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     // publishes it in a new catalog. The advisory fields keep their values from
     // the start: the draft lets the PSI in the packets take precedence.
     qWarning("The PMT of program %d changed; the track follows it.", m_programNumber);
-    if (m_pcrPid >= 0) {
-        m_rapPid = m_pcrPid;
-    }
+    m_rapPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
     if (!m_transparent) {
         selectPids();
     }
@@ -828,10 +827,6 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             continue;
         }
         // Use the known RAP PID if already identified from PAT/PMT or prior latch.
-        // In per-program carriage with a known PCR PID, skip the other PIDs.
-        if (!m_transparent && m_pcrPid >= 0 && pid != m_pcrPid) {
-            continue;
-        }
         if (m_rapPid < 0) {
             m_rapPid = pid; // fallback: latch on first RAI PID seen
         }
