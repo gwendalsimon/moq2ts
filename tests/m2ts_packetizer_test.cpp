@@ -4,6 +4,8 @@
 #include <QDir>
 #include <QFile>
 #include <QMap>
+#include <QStringList>
+#include <QtGlobal>
 #include <QTemporaryDir>
 
 #include <sys/stat.h>
@@ -39,6 +41,18 @@ QByteArray stream(const QList<std::pair<int, int>>& programs) {
     }
     return ts;
 }
+// Qt warnings logged since the last call to takeWarnings().
+QStringList& warnings() {
+    static QStringList list;
+    return list;
+}
+
+void captureWarning(QtMsgType type, const QMessageLogContext&, const QString& message) {
+    if (type == QtWarningMsg) {
+        warnings().append(message);
+    }
+}
+
 // Every packet the packetizer publishes, and the error that ends the track.
 struct Run {
     QList<QByteArray> packets;
@@ -437,10 +451,21 @@ int main() {
                              " live source without indicator: published from its first packet, no random access");
         }
 
+        // A live multiplex with a reference program (the first of the PAT,
+        // whose PMT is known) starts at that program's random access point and
+        // declares random access.
         const QByteArray multiplex = stream({{1, 0x1000}, {2, 0x1001}});
         const LiveRun live = publishLive(dir.filePath("live-m.fifo"), multiplex, true);
-        ok &= expect(!live.randomAccess && live.run.packets.size() == 5 && live.initData.isEmpty(),
-                     "live multiplex: lead-in kept, no random access, no initData");
+        ok &= expect(live.randomAccess && !live.run.packets.isEmpty() && live.run.packets.first() == rap &&
+                         live.firstStartsGroup && live.initData.isEmpty(),
+                     "live multiplex: starts at the reference program's RAP, declares random access");
+        // Without a reference program (no PMT known), it keeps its lead-in and
+        // declares nothing.
+        QByteArray noReference = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
+        noReference += single.mid(2 * 188);
+        const LiveRun none = publishLive(dir.filePath("live-m-none.fifo"), noReference, true);
+        ok &= expect(!none.randomAccess && none.run.packets.size() == 4,
+                     "live multiplex without a reference program: lead-in kept, no random access");
     }
 
     // Group boundaries follow the video PID's random_access_indicator, also
@@ -619,6 +644,43 @@ int main() {
                      "mux rate: no null packets gives no value");
         ok &= expect(measure("mpts-rate.ts", stream({{1, 0x1000}, {2, 0x1001}}, 100, 3, 3000), &note) == 0,
                      "mux rate: not measured for an MPTS");
+    }
+
+    // A multiplex track goes on when its reference program leaves the PAT: the
+    // multiplex is still valid, and the reference fields are advisory.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1), 1) + video;
+        const QString path = dir.filePath("reference-leaves.ts");
+        ok &= expect(writeFile(path, ts), "write reference-leaves stream");
+        const Run run = publish(path, true);
+        ok &= expect(run.error.isEmpty() && run.packets.size() == 5, "multiplex: the track goes on");
+    }
+
+    // Groups longer than 2 seconds give one warning; Groups 2 seconds apart do
+    // not.
+    {
+        const auto gops = [](std::uint64_t spacing90k) {
+            QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+            ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+            for (int gop = 0; gop < 3; ++gop) {
+                ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(900000 + gop * spacing90k), gop, 0x40);
+            }
+            return ts;
+        };
+        qInstallMessageHandler(captureWarning);
+        for (const auto& [spacing, expected] : {std::pair{std::uint64_t{180000}, 0}, std::pair{std::uint64_t{270000}, 1}}) {
+            warnings().clear();
+            const QString path = dir.filePath(QStringLiteral("gop-%1.ts").arg(spacing));
+            writeFile(path, gops(spacing));
+            publish(path, false);
+            const int count = static_cast<int>(warnings().filter("longer than the 2 s").size());
+            ok &= expect(count == expected, "Group duration warning for a spacing of " + std::to_string(spacing / 90) +
+                                                " ms: " + std::to_string(count));
+        }
+        qInstallMessageHandler(nullptr);
     }
 
     // Object media time: the PTS of the first video PES in each Object, on the

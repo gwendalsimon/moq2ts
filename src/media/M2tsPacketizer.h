@@ -241,6 +241,9 @@ private:
     qint64 m_measuredMuxRate = 0;
     QString m_muxRateNote;
 
+    // PTS of the last Group start, and whether the 2-second warning was given.
+    std::optional<std::uint64_t> m_lastGroupPtsUs;
+    bool m_warnedLongGroup = false;
     // A live track drops the packets before its first random access point.
     bool m_dropLeadIn = false;
     bool m_leadInDropped = false;

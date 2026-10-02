@@ -454,9 +454,11 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     m_initDataChanged = false;
     // A live track drops the packets before its first random access point, so
     // that every Group starts at one (draft "Group Boundaries"). A file keeps
-    // byte 0, and a multiplex keeps its lead-in. The random_access_indicator is
-    // optional, so the track declares random access only if one appears.
-    m_dropLeadIn = m_sequential && !(m_transparent && m_patProgramCount != 1) && findRandomAccess();
+    // byte 0. On a multiplex, the points are those of the reference program,
+    // so a multiplex without one keeps its lead-in. The random_access_indicator
+    // is optional, so the track declares random access only if one appears.
+    const bool multiplex = m_transparent && m_patProgramCount != 1;
+    m_dropLeadIn = m_sequential && (!multiplex || m_pcrPid >= 0) && findRandomAccess();
     // readObject reads the PSI again from the start, so the assemblers restart.
     // The stored tables stay, so the same tables count as repeats.
     m_patAssembler.reset();
@@ -1084,6 +1086,18 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // New group at this RAP boundary
         ++m_currentGroupId;
         m_nextObjectIdInGroup = 0;
+    }
+    // Draft "Group Boundaries": a Group SHOULD NOT last longer than 2 seconds.
+    // Groups follow the random access points of the source, so say once when
+    // two of them are further apart.
+    if (rapDetected && object->ptsUs.has_value()) {
+        if (m_lastGroupPtsUs.has_value() && !m_warnedLongGroup && *object->ptsUs > *m_lastGroupPtsUs + 2000000) {
+            m_warnedLongGroup = true;
+            qWarning("Random access points %.1f s apart: a Group lasts longer than the 2 s that MSFTS "
+                     "recommends. Shorten the GOP at the encoder.",
+                     static_cast<double>(*object->ptsUs - *m_lastGroupPtsUs) / 1e6);
+        }
+        m_lastGroupPtsUs = object->ptsUs;
     }
     if (rapDetected) {
         m_sawFirstRap = true;

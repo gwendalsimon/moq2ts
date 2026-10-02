@@ -268,10 +268,10 @@ capture catalog (`per-program`) looks like:
 
 An `--unmodified` track is `unmodified-program` when the source PAT lists one
 program. It then carries `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` like a
-`per-program` track. Otherwise it is `unmodified-multiplex`, which omits
-`mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, and
-`mpeg2tsSiPids` — the draft requires them absent when the publisher selects
-no program.
+`per-program` track. Otherwise it is `unmodified-multiplex`. Its
+`mpeg2tsProgramNumber` and `mpeg2tsPcrPid` then name a reference program,
+the first of the PAT or the `--program` one, on whose PCR a subscriber paces
+the multiplex. It never carries `mpeg2tsMuxRate` or `mpeg2tsSiPids`.
 
 Field presence is conditional:
 
@@ -281,9 +281,10 @@ Field presence is conditional:
   is the inverse — VOD only, present only when `isLive` is false and the value is
   positive (MSF 5.1.37).
 - `bitrate` is emitted only when greater than zero.
-- `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, and `mpeg2tsMuxRate` are emitted
-  in every mode except `unmodified-multiplex`; `mpeg2tsPcrPid` is further
-  gated on being known (PID >= 0), and `mpeg2tsMuxRate` on being positive.
+- `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` are emitted in every mode when
+  `mpeg2tsPcrPid` is known (PID >= 0), and always outside
+  `unmodified-multiplex`. `mpeg2tsMuxRate` is emitted outside
+  `unmodified-multiplex` when positive.
 - `mpeg2tsSiPids` is emitted only in `per-program` mode.
 - `mpeg2tsTimestampMode` is valid only for 192-octet source packets and MUST
   NOT appear for 188.
@@ -291,8 +292,10 @@ Field presence is conditional:
   Group contains a random access point. A live source (pipe, FIFO, SRT)
   drops the packets before its first random access point and declares it,
   if the source sets the random_access_indicator on its video PID (or on the
-  PCR PID without video), except for `unmodified-multiplex`. A file keeps
-  byte 0 and does not.
+  PCR PID without video). On `unmodified-multiplex`, these are the points of
+  the reference program, and a multiplex without one declares nothing. A
+  file keeps byte 0 and does not declare it. Groups longer than 2 seconds
+  give one warning.
 
 ## Timeline track
 

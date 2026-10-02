@@ -285,9 +285,6 @@ int main(int argc, char** argv) {
             if (cfg.retainNullPackets) {
                 ignored << QStringLiteral("--retain-null");
             }
-            if (parser.isSet(QStringLiteral("program"))) {
-                ignored << QStringLiteral("--program");
-            }
             if (!ignored.isEmpty()) {
                 logLine(stderr, "warn",
                         QStringLiteral("%1 %2 only meaningful in per-program mode; SRT ingest always "
