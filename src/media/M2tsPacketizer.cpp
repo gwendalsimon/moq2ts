@@ -678,7 +678,7 @@ SectionRewriter::Decision M2tsPacketizer::rewriteSection(int pid, const QByteArr
     }
     if (pid == 0x0011) {
         // SDT actual: the carried service only. SDT other describes other
-        // transport streams. The BAT passes unchanged (decision C-D2).
+        // transport streams. The BAT passes unchanged.
         if (tableId == 0x42) {
             return rewriteSdt(section);
         }
@@ -725,10 +725,9 @@ SectionRewriter::Decision M2tsPacketizer::rewriteSdt(const QByteArray& section) 
 }
 
 SectionRewriter::Decision M2tsPacketizer::rewriteCat(const QByteArray& section) {
-    // Decision C-D1: an EMM stream belongs to a CA system, so the entries of
-    // the carried program are the CA_descriptors of the CA systems that its
-    // ECMs use (draft "Per-Program": SHOULD rewrite the CAT). Other
-    // descriptors stay.
+    // An EMM stream belongs to a CA system, so the entries of the carried
+    // program are the CA_descriptors of the CA systems that its ECMs use
+    // (draft "Per-Program": SHOULD rewrite the CAT). Other descriptors stay.
     const int end = static_cast<int>(section.size()) - 4;
     QByteArray kept;
     std::set<int> emmPids;
