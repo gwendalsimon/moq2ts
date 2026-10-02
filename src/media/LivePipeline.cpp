@@ -50,6 +50,24 @@ PublishedObject timelineObject(PublishState* st,
     return timeline;
 }
 
+// The one place where a PSI change reaches the catalog: a new independent
+// catalog, because MSF -01 Section 5.3 forbids changing a track. Switch to the
+// "update" operation once MSF -02 and the SDK support it (moq-wg/msf#183).
+PublishedObject updateCatalog(PublishState* st, const QByteArray& initData) {
+    st->catalog.initData = initData;
+    if (st->catalog.isLive) {
+        st->catalog.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
+    }
+    PublishedObject catalog;
+    catalog.trackName = QStringLiteral("catalog");
+    catalog.payload = MsftsMuxer::catalogJson(st->catalog);
+    catalog.groupId = ++st->catalogGroupId;
+    catalog.objectId = 0;
+    catalog.startsGroup = true;
+    catalog.finalInGroup = true;
+    return catalog;
+}
+
 } // namespace
 
 LivePipeline::LivePipeline(QObject* parent)
@@ -195,10 +213,10 @@ void LivePipeline::runLoop() {
             if (!m_running.load(std::memory_order_acquire)) {
                 return std::nullopt;
             }
-            if (st->pendingTimeline.has_value()) {
-                auto timeline = std::move(st->pendingTimeline);
-                st->pendingTimeline.reset();
-                return timeline;
+            if (!st->pending.empty()) {
+                PublishedObject next = std::move(st->pending.front());
+                st->pending.pop_front();
+                return next;
             }
 
             M2tsObject object;
@@ -223,8 +241,8 @@ void LivePipeline::runLoop() {
             // One timeline record per media Group, for its first Object that
             // starts a video PES, with that PES's PTS (MSF 7.1.1).
             if (object.ptsUs.has_value() && st->timelineGroupId != published.groupId) {
-                st->pendingTimeline = timelineObject(st.get(), timelineTrackName, published,
-                                                     *object.ptsUs, nowUnixUs());
+                st->pending.push_back(timelineObject(st.get(), timelineTrackName, published,
+                                                     *object.ptsUs, nowUnixUs()));
             }
             ++st->objects;
             st->bytes += published.payload.size();
@@ -306,7 +324,7 @@ void LivePipeline::runLoop() {
         .timelineTrack = timelineTrackName,
         .namespaceName = m_config.namespaceName,
         .trackDurationMs = fileDurationMs,
-        .randomAccess = true,
+        .randomAccess = packetizer.randomAccess(),
         // Unmodified carriage: unmodified-program for a one-program PAT,
         // unmodified-multiplex otherwise (an unparsed PAT counts as a multiplex).
         .mode = !m_config.transparentMode             ? Mpeg2tsMode::PerProgram
@@ -328,26 +346,22 @@ void LivePipeline::runLoop() {
         // already sets it; this is the path production uses.
         catalogSpec.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
     }
-    if (m_config.transparentMode) {
-        // Transparent mode now detects random_access_indicator in TS adaptation
-        // fields and starts new groups at those points (MSFTS Section 6.3). Groups begin
-        // at RAP when the source signals RAI; leave randomAccess true.
-    }
     const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
 
     constexpr std::int64_t kPaceSlackUs = 10000; // 10 ms slack
     // Shared with the lambda by VALUE, so nothing it touches lives on this frame.
     auto st = std::make_shared<PublishState>();
     st->packetizer = packetizerPtr;
+    st->catalog = catalogSpec;
 
     auto nextObject = [this, st, packetsPerObject, trackName, timelineTrackName, liveStream]() -> std::optional<PublishedObject> {
         if (!m_running.load(std::memory_order_acquire)) {
             return std::nullopt;
         }
-        if (st->pendingTimeline.has_value()) {
-            auto timeline = std::move(st->pendingTimeline);
-            st->pendingTimeline.reset();
-            return timeline;
+        if (!st->pending.empty()) {
+            PublishedObject next = std::move(st->pending.front());
+            st->pending.pop_front();
+            return next;
         }
 
         M2tsObject object;
@@ -372,8 +386,8 @@ void LivePipeline::runLoop() {
         // sample in the Object. mediaTimeUs above stays the pacing clock.
         if (object.ptsUs.has_value() && st->timelineGroupId != published.groupId) {
             // MSF 7.1.1: the wallclock time SHOULD be 0 for a VOD asset.
-            st->pendingTimeline = timelineObject(st.get(), timelineTrackName, published,
-                                                 *object.ptsUs, liveStream ? nowUnixUs() : 0);
+            st->pending.push_back(timelineObject(st.get(), timelineTrackName, published,
+                                                 *object.ptsUs, liveStream ? nowUnixUs() : 0));
         }
         ++st->objects;
         st->bytes += published.payload.size();
@@ -395,6 +409,13 @@ void LivePipeline::runLoop() {
             }
         }
 
+        // Draft "Use of MSF Initialization Data": the new initData reaches the
+        // catalog before the Objects that rely on the changed PSI, this one first.
+        QByteArray initData;
+        if (st->packetizer->takeInitDataChange(&initData)) {
+            st->pending.push_front(std::move(published));
+            return updateCatalog(st.get(), initData);
+        }
         return published;
     };
 

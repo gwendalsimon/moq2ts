@@ -97,7 +97,14 @@ media publishing. It currently provides:
   - Scans the initial packet window for PAT and PMT packets, preserves those
     packets in source-packet form, and exposes them for catalog `initData`.
   - Filters MPTS inputs down to the selected program's PSI/PCR/elementary PIDs
-    before objectization.
+    before objectization, with a PAT rewritten to list that program only.
+  - Follows PAT and PMT changes during the session. A per-program track ends
+    when its program leaves the PAT. An unmodified-program track ends when the
+    PAT no longer lists its program alone. When the change alters initData,
+    `LivePipeline::updateCatalog` publishes a new independent catalog before
+    the Object that carries the change (MSF -01 Section 5.3 forbids changing
+    a declared track). The other catalog fields keep their values from the
+    start.
 
 - `src/media/LibavCaptureSource.*`
   - Optional direct libavdevice capture path.
@@ -275,7 +282,11 @@ Field presence is conditional:
 - `mpeg2tsTimestampMode` is valid only for 192-octet source packets and MUST
   NOT appear for 188.
 - `mpeg2tsRandomAccess` is advertised only when the first Object of every
-  Group contains a random access point.
+  Group contains a random access point. A live source (pipe, FIFO, SRT)
+  drops the packets before its first random access point and declares it,
+  if the source sets the random_access_indicator on its video PID (or on the
+  PCR PID without video), except for `unmodified-multiplex`. A file keeps
+  byte 0 and does not.
 
 ## Timeline track
 

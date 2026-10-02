@@ -150,9 +150,10 @@ exists. Launch the packaged app with:
   PAT and PMT packets and emits them as Base64 `initData`, preserving 188-byte
   or 192-byte source-packet form.
 - **Program filtering**: the selected program is discovered from PAT/PMT.
-  Media objects include PAT, the selected PMT, the selected PCR PID, and the
-  elementary PIDs for that program. Packets for other programs and null packets
-  are dropped before publication.
+  Media objects include a PAT rewritten to list that program only, the
+  selected PMT, the selected PCR PID, and the elementary PIDs for that
+  program. Packets for other programs and null packets are dropped before
+  publication.
 - **Timeline track**: each media track gets a `<stream>.timeline` side track of
   MSF `packaging: "mediatimeline"` that `depends` on the media track. Timeline objects
   are a compact `[mediaTimeMs, [groupId, objectId], wallclockMs]` record array

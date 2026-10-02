@@ -44,33 +44,12 @@ int payloadOffset(const QByteArray& tsPacket) {
     return offset < tsPacket.size() ? offset : -1;
 }
 
-bool extractPsiSection(const QByteArray& tsPacket, QByteArray* section) {
-    if (!payloadUnitStart(tsPacket)) {
-        return false;
-    }
-    const int offset = payloadOffset(tsPacket);
-    if (offset < 0 || offset >= tsPacket.size()) {
-        return false;
-    }
-
-    const int pointer = static_cast<unsigned char>(tsPacket[offset]);
-    const int sectionStart = offset + 1 + pointer;
-    if (sectionStart + 3 > tsPacket.size()) {
-        return false;
-    }
-    const int sectionLength = ((static_cast<unsigned char>(tsPacket[sectionStart + 1]) & 0x0f) << 8) |
-                              static_cast<unsigned char>(tsPacket[sectionStart + 2]);
-    if (sectionLength < 5 || sectionStart + 3 + sectionLength > tsPacket.size()) {
-        return false;
-    }
-    *section = tsPacket.mid(sectionStart, 3 + sectionLength);
-    return true;
-}
-
-// The (program_number, PMT PID) entries of a PAT section, without the network
-// PID entry (program_number 0). Returns false when the section is not a PAT.
-bool parsePat(const QByteArray& section, std::vector<std::pair<int, int>>* programs) {
+// The (program_number, PMT PID) entries of a PAT section, and apart from them
+// the network PID (program_number 0), -1 when absent. Returns false when the
+// section is not a PAT.
+bool parsePat(const QByteArray& section, std::vector<std::pair<int, int>>* programs, int* networkPid) {
     programs->clear();
+    *networkPid = -1;
     if (section.size() < 12 || static_cast<unsigned char>(section[0]) != 0x00) {
         return false;
     }
@@ -84,6 +63,8 @@ bool parsePat(const QByteArray& section, std::vector<std::pair<int, int>>* progr
                         static_cast<unsigned char>(section[offset + 3]);
         if (program != 0) {
             programs->emplace_back(program, pid);
+        } else {
+            *networkPid = pid;
         }
     }
     return true;
@@ -124,6 +105,8 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
         return false;
     }
 
+    elementaryPids->clear();
+    *videoPid = -1;
     *pcrPid = ((static_cast<unsigned char>(section[8]) & 0x1f) << 8) |
               static_cast<unsigned char>(section[9]);
     const int programInfoLength = ((static_cast<unsigned char>(section[10]) & 0x0f) << 8) |
@@ -145,6 +128,123 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
 }
 
 } // namespace
+
+std::uint32_t mpegCrc32(const char* data, qsizetype size) {
+    std::uint32_t crc = 0xFFFFFFFFu;
+    for (qsizetype index = 0; index < size; ++index) {
+        crc ^= static_cast<std::uint32_t>(static_cast<unsigned char>(data[index])) << 24;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc & 0x80000000u) ? (crc << 1) ^ 0x04C11DB7u : crc << 1;
+        }
+    }
+    return crc;
+}
+
+void PsiAssembler::reset() {
+    m_section.clear();
+    m_sectionLength = -1;
+    m_packets.clear();
+    m_collecting = false;
+    m_packetRecorded = false;
+    m_lastCc = -1;
+}
+
+QList<PsiAssembler::Section> PsiAssembler::push(const QByteArray& tsPacket, const QByteArray& sourcePacket) {
+    QList<Section> done;
+    const int offset = payloadOffset(tsPacket);
+    if (offset < 0) {
+        return done;   // no payload; the continuity counter does not advance
+    }
+    const int cc = static_cast<unsigned char>(tsPacket[3]) & 0x0F;
+    if (m_lastCc >= 0 && cc == m_lastCc) {
+        return done;   // a duplicate packet (ISO/IEC 13818-1 Section 2.4.3.3)
+    }
+    if (m_lastCc >= 0 && cc != ((m_lastCc + 1) & 0x0F)) {
+        m_collecting = false;   // a lost packet breaks the section in progress
+    }
+    m_lastCc = cc;
+    m_packetRecorded = false;
+
+    const char* payload = tsPacket.constData() + offset;
+    const int size = static_cast<int>(tsPacket.size()) - offset;
+    if (!payloadUnitStart(tsPacket)) {
+        if (m_collecting) {
+            append(payload, size, sourcePacket, &done);
+        }
+        return done;
+    }
+    // The pointer_field counts the bytes that end the section in progress.
+    const int pointer = static_cast<unsigned char>(payload[0]);
+    if (1 + pointer > size) {
+        m_collecting = false;
+        return done;
+    }
+    if (m_collecting) {
+        append(payload + 1, pointer, sourcePacket, &done);
+        m_collecting = false;   // a section still incomplete here is corrupt
+    }
+    // New sections follow until the packet ends or stuffing (0xFF) begins.
+    int position = 1 + pointer;
+    while (position < size && static_cast<unsigned char>(payload[position]) != 0xFF) {
+        m_collecting = true;
+        m_section.clear();
+        m_sectionLength = -1;
+        m_packets.clear();
+        m_packetRecorded = false;
+        position += append(payload + position, size - position, sourcePacket, &done);
+        if (m_collecting) {
+            break;   // the section continues in the next packet
+        }
+    }
+    return done;
+}
+
+int PsiAssembler::append(const char* data, int size, const QByteArray& sourcePacket, QList<Section>* done) {
+    int used = 0;
+    while (used < size && m_collecting) {
+        // Up to the 3-octet header first, then up to the section_length it gives.
+        const int target = m_sectionLength < 0 ? 3 : m_sectionLength;
+        const int take = std::min(target - static_cast<int>(m_section.size()), size - used);
+        m_section.append(data + used, take);
+        used += take;
+        if (!m_packetRecorded) {
+            m_packets.append(sourcePacket);
+            m_packetRecorded = true;
+        }
+        if (m_section.size() < 3) {
+            continue;
+        }
+        if (m_sectionLength < 0) {
+            m_sectionLength = 3 + (((static_cast<unsigned char>(m_section[1]) & 0x0F) << 8) |
+                                   static_cast<unsigned char>(m_section[2]));
+        }
+        const int length = m_sectionLength;
+        if (length > 4096) {
+            m_collecting = false;   // longer than any PSI or private section
+        } else if (m_section.size() == length) {
+            m_collecting = false;
+            // With section_syntax_indicator set, the section ends with a CRC_32,
+            // and the CRC over the whole section is then 0.
+            const bool syntax = (static_cast<unsigned char>(m_section[1]) & 0x80) != 0;
+            if (!syntax || (length >= 8 && mpegCrc32(m_section.constData(), length) == 0)) {
+                done->append({m_section, m_packets});
+            }
+        }
+    }
+    return used;
+}
+
+int startingSectionNumber(const QByteArray& tsPacket) {
+    // The section_number of the section that starts in a packet with
+    // payload_unit_start_indicator set, or -1 when its header is not in the
+    // packet.
+    const int offset = payloadOffset(tsPacket);
+    if (offset < 0 || !payloadUnitStart(tsPacket)) {
+        return -1;
+    }
+    const int start = offset + 1 + static_cast<unsigned char>(tsPacket[offset]);
+    return start + 6 < tsPacket.size() ? static_cast<unsigned char>(tsPacket[start + 6]) : -1;
+}
 
 std::int64_t pesPts(const QByteArray& tsPacket) {
     if (!payloadUnitStart(tsPacket)) {
@@ -213,28 +313,48 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
         return false;
     }
     // FIFOs, pipes and /dev/stdin are non-seekable; readObject drains a prebuffer
-    // instead of rewinding (see collectInitData).
+    // instead of rewinding (see scanPsi).
     m_sequential = m_file.isSequential();
     if (!detectPacketSize(error)) {
         return false;
     }
-    // Transparent mode carries the whole multiplex verbatim: no PID filtering,
-    // and initData stays empty (full PSI rides in-band). However, we still scan
-    // PAT/PMT to identify the PCR PID (video) for MSFTS Section 6.3 RAI-based group
-    // boundary detection.
+    // Both modes read the PAT and the PMT of the selected program first. The
+    // PCR (video) PID drives the group boundaries, and per-program carriage
+    // also needs the PIDs to keep and the initData.
+    const bool psiFound = scanPsi(error);
     if (!m_transparent) {
-        if (!collectInitData(error)) {
+        if (!psiFound || !selectProgramPids(error)) {
             return false;
         }
-    } else {
-        if (!identifyVideoPid(error)) {
-            // Non-fatal for transparent mode: if we can't find the video PID,
-            // fall back to latching on the first PID with RAI at runtime.
-            if (error) {
-                *error = QString(); // clear - not fatal
-            }
+    } else if (!psiFound) {
+        // Non-fatal for unmodified carriage: without the PCR PID, the group
+        // boundaries latch on the first PID with a random access indicator.
+        if (error) {
+            *error = QString();
         }
     }
+    // Group boundaries follow the random_access_indicator of the video PID, or
+    // of the PCR PID when the PMT lists no video stream. The PCR can travel on
+    // a PID of its own, which never carries the indicator.
+    m_rapPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
+    // An unmodified-program track carries its source PAT and PMT as initData,
+    // so a joining subscriber can pass them to the receiver before the first
+    // Object (draft "Use of MSF Initialization Data").
+    if (m_transparent && psiFound && m_patProgramCount == 1) {
+        refreshInitData();
+    }
+    m_initDataChanged = false;
+    // A live track drops the packets before its first random access point, so
+    // that every Group starts at one (draft "Group Boundaries"). A file keeps
+    // byte 0, and a multiplex keeps its lead-in. The random_access_indicator is
+    // optional, so the track declares random access only if one appears.
+    m_dropLeadIn = m_sequential && !(m_transparent && m_patProgramCount != 1) && findRandomAccess();
+    // readObject reads the PSI again from the start, so the assemblers restart.
+    // The stored tables stay, so the same tables count as repeats.
+    m_patAssembler.reset();
+    m_pmtAssembler.reset();
+    m_openProgramCount = m_patProgramCount;
+    m_opened = true;
     // Non-seekable sources cannot rewind; the prebuffer (or the peeked bytes) is
     // replayed forward-only by readObject.
     return m_sequential ? true : m_file.seek(0);
@@ -283,20 +403,20 @@ QByteArray M2tsPacketizer::tsPacketView(const QByteArray& sourcePacket) const {
     return sourcePacket;
 }
 
-bool M2tsPacketizer::collectInitData(QString* error) {
-    const qint64 originalPos = m_file.pos();
-    if (!m_sequential && !m_file.seek(0)) {
+bool M2tsPacketizer::scanPsi(QString* error) {
+    const auto fail = [error](const QString& message) {
         if (error) {
-            *error = QStringLiteral("Failed to seek M2TS source while collecting initData.");
+            *error = message;
         }
         return false;
+    };
+    const qint64 originalPos = m_file.pos();
+    if (!m_sequential && !m_file.seek(0)) {
+        return fail(QStringLiteral("Failed to seek M2TS source while reading the PAT and PMT."));
     }
 
-    QByteArray patPacket;
-    QByteArray pmtPacket;
-    std::set<int> elementaryPids;
     constexpr int maxPacketsToScan = 4096;
-    for (int index = 0; index < maxPacketsToScan; ++index) {
+    for (int index = 0; index < maxPacketsToScan && m_pmt.bytes.isEmpty(); ++index) {
         const QByteArray sourcePacket = m_file.read(m_packetSize);
         if (sourcePacket.size() != m_packetSize) {
             break;
@@ -307,157 +427,299 @@ bool M2tsPacketizer::collectInitData(QString* error) {
             m_prebuffer += sourcePacket;
         }
         if (!packetHasSync(sourcePacket)) {
-            if (error) {
-                *error = QStringLiteral("Invalid TS sync byte while collecting initData.");
-            }
-            return false;
+            return fail(QStringLiteral("Invalid TS sync byte while reading the PAT and PMT."));
         }
-
-        const QByteArray tsPacket = tsPacketView(sourcePacket);
-        const int pid = pidOf(tsPacket);
-        if (pid == 0 && patPacket.isEmpty()) {
-            QByteArray patSection;
-            std::vector<std::pair<int, int>> programs;
-            if (extractPsiSection(tsPacket, &patSection) && parsePat(patSection, &programs) &&
-                findPatProgram(programs, m_requestedProgramNumber, &m_programNumber, &m_pmtPid)) {
-                patPacket = sourcePacket;
-                m_patProgramCount = static_cast<int>(programs.size());
-            }
-        } else if (m_pmtPid >= 0 && pid == m_pmtPid && pmtPacket.isEmpty()) {
-            QByteArray pmtSection;
-            if (extractPsiSection(tsPacket, &pmtSection) && !pmtSection.isEmpty() &&
-                parsePmt(pmtSection, &m_pcrPid, &elementaryPids, &m_videoPid)) {
-                pmtPacket = sourcePacket;
-            }
-        }
-
-        if (!patPacket.isEmpty() && !pmtPacket.isEmpty()) {
-            break;
-        }
+        handlePsiPacket(tsPacketView(sourcePacket), sourcePacket);
+    }
+    // Non-seekable sources keep their forward-only position; readObject drains the
+    // prebuffer captured above.
+    if (!m_sequential) {
+        m_file.seek(originalPos);
     }
 
-    if (!patPacket.isEmpty()) {
-        m_initData += patPacket;
+    if (m_pmtPid < 0 && m_requestedProgramNumber != 0 && !m_patPrograms.empty()) {
+        return fail(QStringLiteral("Requested program %1 was not found in PAT.").arg(m_requestedProgramNumber));
     }
-    if (!pmtPacket.isEmpty()) {
-        m_initData += pmtPacket;
+    if (m_pmt.bytes.isEmpty()) {
+        return fail(QStringLiteral("Failed to collect PAT/PMT packets for catalog initData."));
+    }
+    return true;
+}
+
+void M2tsPacketizer::handlePsiPacket(const QByteArray& tsPacket, const QByteArray& sourcePacket) {
+    const int pid = pidOf(tsPacket);
+    if (pid == 0x0000) {
+        for (const PsiAssembler::Section& section : m_patAssembler.push(tsPacket, sourcePacket)) {
+            onPat(section);
+        }
+    } else if (pid == m_pmtPid) {
+        for (const PsiAssembler::Section& section : m_pmtAssembler.push(tsPacket, sourcePacket)) {
+            onPmt(section);
+        }
+    }
+}
+
+void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
+    // A section with current_next_indicator 0 announces a table that does not
+    // apply yet (ISO/IEC 13818-1 Section 2.4.4).
+    if (section.bytes.size() < 12 || (static_cast<unsigned char>(section.bytes[5]) & 0x01) == 0) {
+        return;
+    }
+    // A large PAT spans several sections. It applies once sections 0 to
+    // last_section_number of one version_number are in.
+    const int version = (static_cast<unsigned char>(section.bytes[5]) >> 1) & 0x1F;
+    const int number = static_cast<unsigned char>(section.bytes[6]);
+    const int last = static_cast<unsigned char>(section.bytes[7]);
+    if (version != m_patPartsVersion || last != m_patPartsLast) {
+        m_patParts.clear();
+        m_patPartsVersion = version;
+        m_patPartsLast = last;
+    }
+    if (number > last) {
+        return;
+    }
+    m_patParts[number] = section;
+    if (static_cast<int>(m_patParts.size()) != last + 1) {
+        return;
+    }
+    PsiAssembler::Section table;
+    std::vector<std::pair<int, int>> programs;
+    int networkPid = -1;
+    for (const auto& [index, part] : m_patParts) {
+        std::vector<std::pair<int, int>> partPrograms;
+        int partNetworkPid = -1;
+        if (!parsePat(part.bytes, &partPrograms, &partNetworkPid)) {
+            return;   // not a PAT
+        }
+        programs.insert(programs.end(), partPrograms.begin(), partPrograms.end());
+        networkPid = partNetworkPid >= 0 ? partNetworkPid : networkPid;
+        table.bytes += part.bytes;
+        table.sourcePackets += part.sourcePackets;
+    }
+    if (table.bytes == m_pat.bytes) {
+        return;   // a repeat
+    }
+    m_pat = table;
+    m_patPrograms = programs;
+    m_networkPid = networkPid;
+    m_patProgramCount = static_cast<int>(programs.size());
+    if (!m_opened) {
+        if (m_pmtPid < 0) {
+            // A single-program source has only one program to describe, so the
+            // requested number does not apply to it in unmodified carriage.
+            const int requested = m_transparent && m_patProgramCount == 1 ? 0 : m_requestedProgramNumber;
+            findPatProgram(programs, requested, &m_programNumber, &m_pmtPid);
+        }
+        return;
     }
 
-    if (m_initData.isEmpty()) {
-        if (error) {
-            *error = QStringLiteral("Failed to collect PAT/PMT packets for catalog initData.");
+    // A PAT change during the session.
+    int programNumber = 0;
+    int pmtPid = -1;
+    const bool listed = findPatProgram(programs, m_programNumber, &programNumber, &pmtPid);
+    if (m_transparent && m_openProgramCount == 1 && (m_patProgramCount != 1 || !listed)) {
+        // The catalog declares unmodified-program with this program number. A
+        // new number needs a new track (draft "Catalog"), which moq2ts cannot
+        // add during a session, and two programs make the mode false.
+        endTrack(QStringLiteral("The source PAT no longer lists program %1 alone; the "
+                                "unmodified-program track ends.").arg(m_programNumber));
+        return;
+    }
+    if (!m_transparent && !listed) {
+        // Draft "Per-Program": the publisher SHOULD end the track.
+        endTrack(QStringLiteral("Program %1 left the source PAT; the track ends.").arg(m_programNumber));
+        return;
+    }
+    if (listed && pmtPid != m_pmtPid) {
+        qWarning("Program %d moved its PMT from PID %d to PID %d.", m_programNumber, m_pmtPid, pmtPid);
+        m_pmtPid = pmtPid;
+        m_pmtAssembler.reset();
+        m_pmt = {};
+    }
+    if (!m_transparent) {
+        rewritePat();
+        selectPids();
+    }
+    refreshInitData();
+}
+
+void M2tsPacketizer::endTrack(const QString& reason) {
+    m_ended = true;
+    m_endReason = reason;
+}
+
+void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
+    // A PMT PID can carry the PMTs of several programs; keep the selected one.
+    // A section with current_next_indicator 0 does not apply yet.
+    if (section.bytes == m_pmt.bytes || section.bytes.size() < 12 ||
+        (static_cast<unsigned char>(section.bytes[5]) & 0x01) == 0 ||
+        ((static_cast<unsigned char>(section.bytes[3]) << 8) | static_cast<unsigned char>(section.bytes[4])) !=
+            m_programNumber) {
+        return;
+    }
+    int pcrPid = -1;
+    int videoPid = -1;
+    std::set<int> elementaryPids;
+    if (!parsePmt(section.bytes, &pcrPid, &elementaryPids, &videoPid)) {
+        return;
+    }
+    m_pmt = section;
+    m_pcrPid = pcrPid;
+    m_videoPid = videoPid;
+    m_elementaryPids = elementaryPids;
+    if (!m_opened) {
+        return;
+    }
+    // A PMT change during the session. initData follows it, and the pipeline
+    // publishes it in a new catalog. The advisory fields keep their values from
+    // the start: the draft lets the PSI in the packets take precedence.
+    qWarning("The PMT of program %d changed; the track follows it.", m_programNumber);
+    m_rapPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
+    if (!m_transparent) {
+        selectPids();
+    }
+    refreshInitData();
+}
+
+void M2tsPacketizer::refreshInitData() {
+    // initData is the PAT and the PMT that the track carries: the rewritten PAT
+    // in per-program carriage, the source PAT in unmodified-program carriage.
+    // A multiplex has none. While a moved PMT has not arrived yet, the tables
+    // do not match, so initData waits for it.
+    const int programs = m_opened ? m_openProgramCount : m_patProgramCount;
+    if ((m_transparent && programs != 1) || m_pat.bytes.isEmpty() || m_pmt.bytes.isEmpty()) {
+        return;
+    }
+    QByteArray initData;
+    if (m_transparent) {
+        for (const QByteArray& packet : m_pat.sourcePackets) {
+            initData += packet;
         }
+    } else {
+        initData = rewrittenPatPacket(m_pat.sourcePackets.first(), 0);
+    }
+    for (const QByteArray& packet : m_pmt.sourcePackets) {
+        initData += packet;
+    }
+    if (initData != m_initData) {
+        m_initData = initData;
+        m_initDataChanged = true;
+    }
+}
+
+bool M2tsPacketizer::takeInitDataChange(QByteArray* initData) {
+    if (!m_initDataChanged) {
         return false;
     }
+    m_initDataChanged = false;
+    *initData = m_initData;
+    return true;
+}
 
-    m_selectedPids.clear();
-    m_selectedPids.insert(0x0000);
-    if (m_pmtPid >= 0) {
-        m_selectedPids.insert(m_pmtPid);
+void M2tsPacketizer::rewritePat() {
+    // Draft "Per-Program": the PAT lists only the program present in this
+    // track. The network PID entry stays only with --retain-si, which keeps the
+    // NIT. The version_number is set independently of the source, and changes
+    // only when the content of the rewritten table changes.
+    QByteArray entries;
+    const auto appendEntry = [&entries](int program, int pid) {
+        entries.append(static_cast<char>((program >> 8) & 0xFF));
+        entries.append(static_cast<char>(program & 0xFF));
+        entries.append(static_cast<char>(0xE0 | ((pid >> 8) & 0x1F)));
+        entries.append(static_cast<char>(pid & 0xFF));
+    };
+    if (m_retainSiTables && m_networkPid >= 0) {
+        appendEntry(0, m_networkPid);
     }
-    if (m_pcrPid >= 0) {
-        m_selectedPids.insert(m_pcrPid);
+    appendEntry(m_programNumber, m_pmtPid);
+    const QByteArray content = m_pat.bytes.mid(3, 2) + entries;   // transport_stream_id and entries
+    if (content == m_rewrittenPatContent) {
+        return;
     }
-    m_selectedPids.insert(elementaryPids.begin(), elementaryPids.end());
+    m_rewrittenPatContent = content;
+    m_rewrittenPatVersion = (m_rewrittenPatVersion + 1) & 0x1F;   // 0 for the first table
 
-    if (m_requestedProgramNumber != 0 && m_programNumber != m_requestedProgramNumber) {
-        if (error) {
-            *error = QStringLiteral("Requested program %1 was not found in PAT.").arg(m_requestedProgramNumber);
-        }
-        return false;
+    QByteArray section;
+    section.append(char(0x00));                                   // table_id
+    const int sectionLength = 5 + static_cast<int>(entries.size()) + 4;
+    section.append(static_cast<char>(0xB0 | ((sectionLength >> 8) & 0x0F)));
+    section.append(static_cast<char>(sectionLength & 0xFF));
+    section.append(content.left(2));
+    section.append(static_cast<char>(0xC1 | (m_rewrittenPatVersion << 1)));   // current_next_indicator 1
+    section.append(char(0x00));                                   // section_number
+    section.append(char(0x00));                                   // last_section_number
+    section.append(entries);
+    const std::uint32_t crc = mpegCrc32(section.constData(), section.size());
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        section.append(static_cast<char>((crc >> shift) & 0xFF));
     }
-    if (m_selectedPids.size() <= 2) {
+    m_rewrittenPat = section;
+}
+
+QByteArray M2tsPacketizer::rewrittenPatPacket(const QByteArray& sourcePacket, int continuityCounter) const {
+    QByteArray packet;
+    if (m_packetSize == 192) {
+        packet += sourcePacket.left(4);   // the prefix of the packet it replaces
+    }
+    packet.append(char(0x47));
+    packet.append(char(0x40));                                    // payload_unit_start_indicator, PID 0
+    packet.append(char(0x00));
+    packet.append(static_cast<char>(0x10 | (continuityCounter & 0x0F)));   // payload only
+    packet.append(char(0x00));                                    // pointer_field
+    packet.append(m_rewrittenPat);
+    packet.append(QByteArray(m_packetSize - static_cast<int>(packet.size()), char(0xFF)));
+    return packet;
+}
+
+bool M2tsPacketizer::selectProgramPids(QString* error) {
+    // initData carries the rewritten PAT and every packet of the PMT, including
+    // a PMT that spans several packets.
+    rewritePat();
+    refreshInitData();
+
+    if (m_elementaryPids.empty()) {
         if (error) {
             *error = QStringLiteral("Failed to parse selected program PMT elementary PIDs.");
         }
         return false;
     }
+    selectPids();
+    return true;
+}
 
-    // Optional SI-table retention (msfts#7 suggestion 1). Added after the
-    // elementary-PID sanity check above so it cannot mask an unparsed PMT: keep
-    // the well-known DVB PSI/SI PIDs (NIT 0x10, SDT/BAT 0x11, EIT 0x12,
-    // TDT/TOT 0x14) alongside the selected program.
+void M2tsPacketizer::selectPids() {
+    m_selectedPids.reset();
+    m_selectedPids.set(0x0000);
+    m_selectedPids.set(m_pmtPid);
+    if (m_pcrPid >= 0) {
+        m_selectedPids.set(m_pcrPid);
+    }
+    for (int pid : m_elementaryPids) {
+        m_selectedPids.set(pid);
+    }
+    // Optional SI-table retention (msfts#7 suggestion 1): keep the well-known
+    // DVB PSI/SI PIDs (NIT 0x10, SDT/BAT 0x11, EIT 0x12, TDT/TOT 0x14) alongside
+    // the selected program.
     if (m_retainSiTables) {
         m_retainedSiPids.clear();
         for (int siPid : {0x0010, 0x0011, 0x0012, 0x0014}) {
-            m_selectedPids.insert(siPid);
+            m_selectedPids.set(siPid);
             m_retainedSiPids.append(siPid);
         }
     }
-
-    // Non-seekable sources keep their forward-only position; readObject drains the
-    // prebuffer captured above.
-    return m_sequential ? true : m_file.seek(originalPos);
-}
-
-bool M2tsPacketizer::identifyVideoPid(QString* error) {
-    // Lightweight PAT/PMT scan for transparent mode: identifies the PCR PID
-    // (typically the video PID) for RAI-based group boundary detection without
-    // building initData or setting up PID filtering.
-    const qint64 originalPos = m_file.pos();
-    if (!m_sequential && !m_file.seek(0)) {
-        return false;
-    }
-
-    constexpr int maxPacketsToScan = 4096;
-    int pmtPid = -1;
-    int programNumber = 0;
-    int pcrPid = -1;
-    std::set<int> elementaryPids;
-
-    for (int index = 0; index < maxPacketsToScan; ++index) {
-        const QByteArray sourcePacket = m_file.read(m_packetSize);
-        if (sourcePacket.size() != m_packetSize) {
-            break;
-        }
-        if (m_sequential) {
-            m_prebuffer += sourcePacket;
-        }
-        if (!packetHasSync(sourcePacket)) {
-            break;
-        }
-
-        const QByteArray tsPacket = tsPacketView(sourcePacket);
-        const int pid = pidOf(tsPacket);
-        if (pid == 0 && pmtPid < 0) {
-            QByteArray patSection;
-            std::vector<std::pair<int, int>> programs;
-            if (extractPsiSection(tsPacket, &patSection) && parsePat(patSection, &programs)) {
-                m_patProgramCount = static_cast<int>(programs.size());
-                // A single-program source has only one program to describe, so
-                // the requested number does not apply to it.
-                findPatProgram(programs, m_patProgramCount == 1 ? 0 : m_requestedProgramNumber,
-                               &programNumber, &pmtPid);
-            }
-        } else if (pmtPid >= 0 && pid == pmtPid && pcrPid < 0) {
-            QByteArray pmtSection;
-            if (extractPsiSection(tsPacket, &pmtSection) && !pmtSection.isEmpty()) {
-                parsePmt(pmtSection, &pcrPid, &elementaryPids, &m_videoPid);
-            }
-        }
-
-        if (pmtPid >= 0 && pcrPid >= 0) {
-            break;
-        }
-    }
-
-    if (pcrPid >= 0) {
-        m_pcrPid = pcrPid;
-        m_rapPid = pcrPid; // Use PCR PID (video) for RAI group detection
-        m_pmtPid = pmtPid;
-        m_programNumber = programNumber;
-    }
-
-    if (!m_sequential) {
-        m_file.seek(originalPos);
-    }
-    return pcrPid >= 0;
 }
 
 bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QString* error) {
     if (object == nullptr || m_packetSize <= 0) {
         if (error) {
             *error = QStringLiteral("Packetizer is not open.");
+        }
+        return false;
+    }
+
+    if (m_ended) {
+        if (error) {
+            *error = m_endReason;
         }
         return false;
     }
@@ -491,31 +753,58 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             }
             return false;
         }
-        // Transparent mode emits every synced packet verbatim (no PID filtering).
+        // Live PSI tracking, in every mode: the PAT and the PMT of the selected
+        // program update the filter, or end the track. The packet that ends the
+        // track is not published.
+        // A view of the TS packet, without a copy; packet outlives every use.
+        const QByteArray tsView = QByteArray::fromRawData(packet.constData() + (m_packetSize == 192 ? 4 : 0), 188);
+        const int pid = pidOf(tsView);
+        if (pid == 0x0000 || pid == m_pmtPid) {
+            handlePsiPacket(tsView, packet);
+            if (m_ended) {
+                break;
+            }
+        }
+        if (m_dropLeadIn && !m_leadInDropped) {
+            if (!startsRandomAccess(pid, tsView)) {
+                --index;
+                continue;
+            }
+            m_leadInDropped = true;
+        }
+        // Unmodified carriage forwards every synced packet (no PID filtering).
         if (!m_transparent) {
-            const int pid = pidOf(tsPacketView(packet));
-            const bool selected = m_selectedPids.find(pid) != m_selectedPids.end();
+            const bool selected = m_selectedPids.test(static_cast<std::size_t>(pid));
             const bool keepNull = m_retainNullPackets && pid == 0x1FFF;
             if (!selected && !keepNull) {
                 --index;
                 continue;
+            }
+            // One rewritten PAT packet takes the place of the packet that starts
+            // section 0 of each source PAT, which keeps the source repetition
+            // rate. The other packets of a long source PAT go. PID 0 gets its
+            // own continuity counter.
+            if (pid == 0x0000) {
+                if (!payloadUnitStart(tsView) || startingSectionNumber(tsView) > 0) {
+                    --index;
+                    continue;
+                }
+                packet = rewrittenPatPacket(packet, m_patContinuityCounter);
+                m_patContinuityCounter = (m_patContinuityCounter + 1) & 0x0F;
             }
         }
         payload += packet;
     }
 
     if (payload.isEmpty()) {
+        if (m_ended && error) {
+            *error = m_endReason;
+        }
         return false;
     }
 
-    // One pass over the Object, without copying packets, finds two things:
-    // - MSFTS Group numbering: a new group starts at a random access point. The
-    //   video (PCR) PID is identified from PAT/PMT at open() time; if that scan
-    //   failed (e.g. sequential source), the scan latches onto the first PID
-    //   where the random_access_indicator is observed.
-    // - MSF media timeline (draft-ietf-moq-msf-01 Section 7.1.1): the media time
-    //   of an Object is the PTS of its first media sample, taken from the first
-    //   video PES that starts in it, on the PMT's video PID or the PCR PID.
+    // One pass over the Object: a random access point starts a new Group, and
+    // the first video PES gives the media time (MSF -01 Section 7.1.1).
     bool rapDetected = false;
     object->ptsUs.reset();
     const int ps = m_packetSize;
@@ -538,10 +827,6 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             continue;
         }
         // Use the known RAP PID if already identified from PAT/PMT or prior latch.
-        // In filtered mode without a known PCR PID, skip non-PCR PIDs.
-        if (!m_transparent && m_pcrPid >= 0 && pid != m_pcrPid) {
-            continue;
-        }
         if (m_rapPid < 0) {
             m_rapPid = pid; // fallback: latch on first RAI PID seen
         }
@@ -563,6 +848,45 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     object->startsGroup = rapDetected;
     ++m_nextObjectId;
     return true;
+}
+
+bool M2tsPacketizer::findRandomAccess() {
+    // Looks ahead on a live source, up to 20,000 packets (about 2 seconds at
+    // 10 Mbit/s), for the first random access point. The packets read stay in
+    // the prebuffer, so readObject still publishes them in order.
+    constexpr int maxPackets = 20000;
+    const int savedRapPid = m_rapPid;
+    for (qsizetype offset = 0; offset < qsizetype{maxPackets} * m_packetSize; offset += m_packetSize) {
+        if (offset + m_packetSize > m_prebuffer.size()) {
+            const QByteArray packet = m_file.read(m_packetSize);
+            if (packet.size() != m_packetSize) {
+                break;
+            }
+            m_prebuffer += packet;
+        }
+        const QByteArray tsPacket = tsPacketView(m_prebuffer.mid(offset, m_packetSize));
+        if (startsRandomAccess(pidOf(tsPacket), tsPacket)) {
+            return true;
+        }
+    }
+    m_rapPid = savedRapPid;
+    qWarning("No random_access_indicator within the first %d packets of the live source; the track "
+             "starts at its first packet and does not declare mpeg2tsRandomAccess.", maxPackets);
+    return false;
+}
+
+bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
+    if (pid <= 0x001F || pid == 0x1FFF || !hasRandomAccessIndicator(tsPacket)) {
+        return false;
+    }
+    if (m_rapPid < 0) {
+        m_rapPid = pid;   // fallback: latch on the first PID with the indicator
+    }
+    return pid == m_rapPid;
+}
+
+bool M2tsPacketizer::randomAccess() const {
+    return m_dropLeadIn;
 }
 
 bool M2tsPacketizer::hasRandomAccessIndicator(const QByteArray& tsPacket) const {

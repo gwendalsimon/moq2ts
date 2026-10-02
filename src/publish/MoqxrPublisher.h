@@ -35,11 +35,8 @@ struct PublishedObject {
     // (M2tsPacketizer.cpp:465 only bumps the group once sawFirstRap), so deriving
     // it would mislabel exactly one object per run.
     bool startsGroup = false;
-    // True when the producer knows that no later object shares this group, as
-    // for a timeline object, the only object of its group. The publisher then
-    // closes the group at once instead of looking ahead for the next object on
-    // the same track, which comes one group later and would hold back every
-    // object queued behind it.
+    // True when no later object shares this group (a timeline or catalog
+    // object), so the publisher closes the group without looking ahead.
     bool finalInGroup = false;
 };
 

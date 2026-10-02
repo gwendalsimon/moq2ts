@@ -5,9 +5,12 @@
 #include <QFile>
 #include <QTemporaryDir>
 
+#include <sys/stat.h>
+
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <thread>
 
 using moq2ts::M2tsObject;
 using moq2ts::M2tsPacketizer;
@@ -34,6 +37,65 @@ QByteArray stream(const QList<std::pair<int, int>>& programs) {
         ts += tb::tsPacket(0x100, false, QByteArray(184, char(0x00)), cc);
     }
     return ts;
+}
+// Every packet the packetizer publishes, and the error that ends the track.
+struct Run {
+    QList<QByteArray> packets;
+    QString error;
+};
+
+Run publish(const QString& path, bool transparent, int program = 0) {
+    Run run;
+    M2tsPacketizer packetizer(path);
+    packetizer.setTransparent(transparent);
+    if (!packetizer.open(program, &run.error)) {
+        return run;
+    }
+    M2tsObject object;
+    while (packetizer.readObject(1, &object, &run.error)) {
+        run.packets.append(object.payload);
+    }
+    return run;
+}
+
+int pidOfPacket(const QByteArray& packet) {
+    return ((static_cast<unsigned char>(packet[1]) & 0x1F) << 8) | static_cast<unsigned char>(packet[2]);
+}
+
+QList<int> pids(const Run& run) {
+    QList<int> result;
+    for (const QByteArray& packet : run.packets) {
+        result.append(pidOfPacket(packet));
+    }
+    return result;
+}
+// Opens path as a live source: a FIFO that a second thread fills with data.
+struct LiveRun {
+    Run run;
+    bool randomAccess = false;
+    QByteArray initData;
+    bool firstStartsGroup = false;
+};
+
+LiveRun publishLive(const QString& fifo, const QByteArray& data, bool transparent) {
+    LiveRun live;
+    ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+    std::thread writer([&] { writeFile(fifo, data); });
+    M2tsPacketizer packetizer(fifo);
+    packetizer.setTransparent(transparent);
+    if (packetizer.open(0, &live.run.error)) {
+        live.randomAccess = packetizer.randomAccess();
+        live.initData = packetizer.initData();
+        M2tsObject object;
+        while (packetizer.readObject(1, &object, &live.run.error)) {
+            if (live.run.packets.isEmpty()) {
+                live.firstStartsGroup = object.startsGroup && object.groupId == 0;
+            }
+            live.run.packets.append(object.payload);
+        }
+    }
+    writer.join();
+    return live;
 }
 }  // namespace
 
@@ -72,6 +134,319 @@ int main() {
         ok &= expect(single.open(7, &error), "transparent SPTS opens with --program 7");
         ok &= expect(single.programNumber() == 1 && single.pcrPid() == 0x100,
                      "transparent SPTS describes its own program");
+    }
+
+    // initData holds every packet of a PMT that spans several packets.
+    {
+        QList<std::pair<int, int>> streams{{0x1B, 0x100}};
+        for (int index = 0; index < 99; ++index) {
+            streams.append({0x06, 0x200 + index});
+        }
+        const QByteArray pat = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        const QList<QByteArray> pmt = tb::psiPackets(0x1000, tb::pmtSection(1, 0x100, streams));
+        QByteArray ts = pat;
+        for (const QByteArray& packet : pmt) {
+            ts += packet;
+        }
+        ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        const QString path = dir.filePath("long-pmt.ts");
+        ok &= expect(writeFile(path, ts) && pmt.size() == 3, "write long-PMT stream");
+        M2tsPacketizer packetizer(path);
+        QString error;
+        ok &= expect(packetizer.open(0, &error), "long PMT opens: " + error.toStdString());
+        ok &= expect(packetizer.initData() == ts.left(4 * 188), "initData holds the PAT and all three PMT packets");
+    }
+
+    // Per-program carriage rewrites the PAT: one packet per source PAT, listing
+    // the selected program only, with its own version_number and continuity
+    // counter. The network PID entry stays only with --retain-si.
+    {
+        // 60 programs plus the network PID: 255 octets, two packets.
+        QList<std::pair<int, int>> programs{{0, 0x0010}};
+        for (int program = 1; program <= 60; ++program) {
+            programs.append({program, 0x1000 + program});
+        }
+        const QByteArray patSection = tb::patSection(programs);
+        const QByteArray pmt = tb::psiPacket(0x1002, tb::pmtSection(2, 0x200, {{0x1B, 0x200}}));
+        QByteArray ts;
+        int patCc = 0;
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            for (const QByteArray& packet : tb::psiPackets(0x0000, patSection, patCc)) {
+                ts += packet;
+                patCc = (patCc + 1) & 0x0F;
+            }
+            ts += pmt + tb::tsPacket(0x200, false, QByteArray(184, char(0)), repeat);
+        }
+        const QString path = dir.filePath("long-pat.ts");
+        ok &= expect(writeFile(path, ts) && tb::psiPackets(0, patSection).size() == 2, "write long-PAT stream");
+
+        for (const bool retainSi : {false, true}) {
+            const std::string label = retainSi ? "PAT rewrite with --retain-si" : "PAT rewrite";
+            M2tsPacketizer packetizer(path);
+            packetizer.setRetainSiTables(retainSi);
+            QString error;
+            ok &= expect(packetizer.open(2, &error), label + ": opens: " + error.toStdString());
+            QByteArray out;
+            M2tsObject object;
+            while (packetizer.readObject(4, &object, &error)) {
+                out += object.payload;
+            }
+            QList<QByteArray> patPackets;
+            for (qsizetype offset = 0; offset + 188 <= out.size(); offset += 188) {
+                if ((((static_cast<unsigned char>(out[offset + 1]) & 0x1F) << 8) | static_cast<unsigned char>(out[offset + 2])) == 0) {
+                    patPackets.append(out.mid(offset, 188));
+                }
+            }
+            ok &= expect(patPackets.size() == 3, label + ": one packet per source PAT");
+            QByteArray expected = tb::patSection(retainSi ? QList<std::pair<int, int>>{{0, 0x0010}, {2, 0x1002}}
+                                                          : QList<std::pair<int, int>>{{2, 0x1002}});
+            moq2ts::PsiAssembler assembler;
+            for (int index = 0; index < patPackets.size(); ++index) {
+                ok &= expect((static_cast<unsigned char>(patPackets.at(index)[3]) & 0x0F) == index,
+                             label + ": continuous continuity counter");
+                const auto sections = assembler.push(patPackets.at(index), patPackets.at(index));
+                ok &= expect(sections.size() == 1 && sections.at(0).bytes == expected,
+                             label + ": the selected program only, version 0, valid CRC_32");
+            }
+            ok &= expect(packetizer.initData().left(188) == patPackets.value(0), label + ": initData starts with the rewritten PAT");
+        }
+    }
+
+    // Live PSI tracking: a PMT that adds a PID. The new PID is dropped before
+    // the change and kept after it.
+    {
+        const QByteArray pat = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        const QByteArray audio = tb::tsPacket(0x101, false, QByteArray(184, char(0)));
+        QByteArray ts = pat + tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}, 0)) + video + audio;
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}, {0x0F, 0x101}}, 1), 1) + video + audio;
+        const QString path = dir.filePath("pmt-adds-pid.ts");
+        ok &= expect(writeFile(path, ts), "write PMT change stream");
+        const Run run = publish(path, false);
+        ok &= expect(pids(run) == QList<int>({0x0000, 0x1000, 0x100, 0x1000, 0x100, 0x101}),
+                     "PMT change: the new audio PID is kept after the change only");
+    }
+
+    // A PMT change gives new initData once; a repeated PMT does not. In
+    // per-program carriage it starts with the rewritten PAT, in
+    // unmodified-program carriage with the source PAT.
+    for (const bool transparent : {false, true}) {
+        const std::string label = transparent ? "unmodified-program initData change" : "per-program initData change";
+        const QByteArray pat = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        const QByteArray pmt0 = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}, 0), 0);
+        const QByteArray pmt0Again = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}, 0), 1);
+        const QByteArray pmt1 = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}, {0x0F, 0x101}}, 1), 2);
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        const QString path = dir.filePath(transparent ? "init-change-u.ts" : "init-change-p.ts");
+        ok &= expect(writeFile(path, pat + pmt0 + video + pmt0Again + video + pmt1 + video), label + ": write");
+        M2tsPacketizer packetizer(path);
+        packetizer.setTransparent(transparent);
+        QString error;
+        ok &= expect(packetizer.open(0, &error), label + ": opens");
+        const QByteArray initial = packetizer.initData();
+        M2tsObject object;
+        QList<int> changedAt;
+        QByteArray changed;
+        for (int index = 0; packetizer.readObject(1, &object, &error); ++index) {
+            QByteArray initData;
+            if (packetizer.takeInitDataChange(&initData)) {
+                changedAt.append(index);
+                changed = initData;
+            }
+        }
+        ok &= expect(changedAt == QList<int>({5}), label + ": one change, at the Object with the new PMT");
+        ok &= expect(changed.mid(188) == pmt1 && changed.left(188) == initial.left(188),
+                     label + ": the new initData has the same PAT and the new PMT");
+    }
+
+    // Live PSI tracking: the PMT moves to a new PID. The filter follows it, and
+    // the rewritten PAT gets version 1 with the new PMT PID.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}, 0), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1100}}, 1), 1);
+        ts += tb::psiPacket(0x1100, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        const QString path = dir.filePath("pmt-moves.ts");
+        ok &= expect(writeFile(path, ts), "write PMT move stream");
+        const Run run = publish(path, false);
+        ok &= expect(pids(run) == QList<int>({0x0000, 0x1000, 0x100, 0x0000, 0x1100, 0x100}),
+                     "PMT move: the new PMT PID is kept");
+        moq2ts::PsiAssembler assembler;
+        QList<QByteArray> pats;
+        for (const QByteArray& packet : run.packets) {
+            if (pidOfPacket(packet) == 0) {
+                for (const auto& section : assembler.push(packet, packet)) {
+                    pats.append(section.bytes);
+                }
+            }
+        }
+        ok &= expect(pats.size() == 2 && pats.at(0) == tb::patSection({{1, 0x1000}}, 0) &&
+                         pats.at(1) == tb::patSection({{1, 0x1100}}, 1),
+                     "PMT move: rewritten PAT version 0, then 1 with the new PID");
+    }
+
+    // Live PSI tracking: the selected program leaves the PAT, which ends a
+    // per-program track. Nothing after the change is published.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1), 1) + video;
+        const QString path = dir.filePath("program-leaves.ts");
+        ok &= expect(writeFile(path, ts), "write program-leaves stream");
+        const Run run = publish(path, false, 1);
+        ok &= expect(pids(run) == QList<int>({0x0000, 0x1000, 0x100}), "program leaves: nothing after the change");
+        ok &= expect(run.error.contains("left the source PAT"), "program leaves: the track ends with a reason");
+    }
+
+    // A "next" PAT (current_next_indicator 0) without the program does not
+    // apply yet, so the per-program track goes on.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1, 0, 0, false), 1) + video;
+        const QString path = dir.filePath("next-pat.ts");
+        ok &= expect(writeFile(path, ts), "write next-PAT stream");
+        const Run run = publish(path, false, 1);
+        ok &= expect(run.error.isEmpty() && pids(run).count(0x100) == 2, "next PAT: the track goes on");
+    }
+
+    // A PAT in two sections applies once both are in. Program 2, listed in the
+    // second section only, opens and is not taken as absent.
+    {
+        const QByteArray video = tb::tsPacket(0x200, false, QByteArray(184, char(0)));
+        QByteArray ts;
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}, 0, 0, 1), 2 * repeat);
+            ts += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 0, 1, 1), 2 * repeat + 1);
+            ts += tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}}), repeat) + video;
+        }
+        const QString path = dir.filePath("two-section-pat.ts");
+        ok &= expect(writeFile(path, ts), "write two-section PAT stream");
+        const Run run = publish(path, false, 2);
+        ok &= expect(run.error.isEmpty() && pids(run).count(0x200) == 2, "two-section PAT: program 2 runs");
+        ok &= expect(pids(run).count(0x0000) == 2, "two-section PAT: one rewritten PAT per source PAT");
+    }
+
+    // The rewritten PAT keeps version 0 when another program moves its PMT.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1101}}, 1), 1) + video;
+        const QString path = dir.filePath("other-program-moves.ts");
+        ok &= expect(writeFile(path, ts), "write other-program stream");
+        const Run run = publish(path, false, 1);
+        moq2ts::PsiAssembler assembler;
+        QList<QByteArray> pats;
+        for (const QByteArray& packet : run.packets) {
+            if (pidOfPacket(packet) == 0) {
+                for (const auto& section : assembler.push(packet, packet)) {
+                    pats.append(section.bytes);
+                }
+            }
+        }
+        ok &= expect(pats.size() == 2 && pats.at(0) == tb::patSection({{1, 0x1000}}, 0) && pats.at(1) == pats.at(0),
+                     "rewritten PAT: version 0 when another program changes");
+    }
+
+    // Live PSI tracking: an unmodified-program source that becomes an MPTS ends
+    // the track, because its mode is no longer true. A repeated PAT does not.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        const QByteArray pmt = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}, 0), 0) + pmt + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}, 0), 1) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 1), 2) + video;
+        const QString path = dir.filePath("spts-to-mpts.ts");
+        ok &= expect(writeFile(path, ts), "write SPTS-to-MPTS stream");
+        const Run run = publish(path, true);
+        ok &= expect(run.packets.size() == 5, "SPTS to MPTS: the repeated PAT passes, the new one ends the track");
+        ok &= expect(run.error.contains("unmodified-program track ends"), "SPTS to MPTS: the track ends with a reason");
+    }
+
+    // Random access (decision E2): a live source starting mid-GOP drops the
+    // lead-in, so Group 0 starts at the random access point, and declares
+    // mpeg2tsRandomAccess. A file keeps byte 0 and declares nothing. A live
+    // multiplex keeps its lead-in and declares nothing.
+    {
+        const auto stream = [](const QList<std::pair<int, int>>& programs) {
+            QByteArray ts = tb::psiPacket(0x0000, tb::patSection(programs));
+            ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+            ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), 0);            // mid-GOP
+            ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), 1, 0x40);    // random access point
+            ts += tb::tsPacket(0x100, false, QByteArray(182, char(0)), 2);
+            return ts;
+        };
+        const QByteArray single = stream({{1, 0x1000}});
+        const QByteArray rap = single.mid(3 * 188, 188);
+
+        for (const bool transparent : {false, true}) {
+            const std::string label = transparent ? "live unmodified-program" : "live per-program";
+            const LiveRun live = publishLive(dir.filePath(transparent ? "live-u.fifo" : "live-p.fifo"), single, transparent);
+            ok &= expect(live.run.error.isEmpty(), label + ": no error: " + live.run.error.toStdString());
+            ok &= expect(live.randomAccess, label + ": declares random access");
+            ok &= expect(!live.run.packets.isEmpty() && live.run.packets.first() == rap, label + ": starts at the RAP");
+            ok &= expect(live.firstStartsGroup, label + ": Group 0 starts at the RAP");
+            ok &= expect(live.initData == single.left(2 * 188) || !transparent,
+                         label + ": initData holds the source PAT and PMT");
+        }
+
+        const QString file = dir.filePath("mid-gop.ts");
+        ok &= expect(writeFile(file, single), "write mid-GOP file");
+        M2tsPacketizer packetizer(file);
+        QString error;
+        ok &= expect(packetizer.open(0, &error) && !packetizer.randomAccess(), "file: no random access");
+        M2tsObject object;
+        ok &= expect(packetizer.readObject(1, &object, &error) && moq2ts::test::pidOfFirst(object.payload) == 0,
+                     "file: byte 0 kept");
+
+        // A live source whose encoder never sets random_access_indicator is
+        // published from its first packet, without random access.
+        QByteArray noIndicator = single;
+        noIndicator[3 * 188 + 5] = static_cast<char>(static_cast<unsigned char>(noIndicator[3 * 188 + 5]) & ~0x40);
+        for (const bool transparent : {false, true}) {
+            const LiveRun live = publishLive(dir.filePath(transparent ? "no-rai-u.fifo" : "no-rai-p.fifo"), noIndicator, transparent);
+            ok &= expect(!live.randomAccess && live.run.packets.size() == 5 && live.run.error.isEmpty(),
+                         std::string(transparent ? "unmodified" : "per-program") +
+                             " live source without indicator: published from its first packet, no random access");
+        }
+
+        const QByteArray multiplex = stream({{1, 0x1000}, {2, 0x1001}});
+        const LiveRun live = publishLive(dir.filePath("live-m.fifo"), multiplex, true);
+        ok &= expect(!live.randomAccess && live.run.packets.size() == 5 && live.initData.isEmpty(),
+                     "live multiplex: lead-in kept, no random access, no initData");
+    }
+
+    // Group boundaries follow the video PID's random_access_indicator, also
+    // when the PCR has a PID of its own, in both modes, for a file and a live
+    // source.
+    {
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x1FF, {{0x1B, 0x100}}));
+        for (int gop = 0; gop < 3; ++gop) {
+            ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000 * gop), gop * 2, 0x40);
+            ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), gop * 2 + 1);
+        }
+        const QString path = dir.filePath("separate-pcr.ts");
+        ok &= expect(writeFile(path, ts), "write separate-PCR stream");
+        for (const bool transparent : {false, true}) {
+            const std::string label = transparent ? "separate PCR, unmodified" : "separate PCR, per-program";
+            M2tsPacketizer packetizer(path);
+            packetizer.setTransparent(transparent);
+            QString error;
+            ok &= expect(packetizer.open(0, &error), label + ": opens");
+            M2tsObject object;
+            int groups = 0;
+            while (packetizer.readObject(1, &object, &error)) {
+                groups += object.startsGroup ? 1 : 0;
+            }
+            ok &= expect(groups == 3, label + ": one Group per random access point");
+            const LiveRun live = publishLive(dir.filePath(transparent ? "sep-pcr-u.fifo" : "sep-pcr-p.fifo"), ts, transparent);
+            ok &= expect(live.randomAccess && live.firstStartsGroup, label + ", live: random access declared");
+        }
     }
 
     // Object media time: the PTS of the first video PES in each Object, on the

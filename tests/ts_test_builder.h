@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <utility>
 
@@ -44,15 +45,16 @@ inline QByteArray finishSection(QByteArray section) {
 }
 
 // PAT listing (program_number, PMT PID) pairs.
-inline QByteArray patSection(const QList<std::pair<int, int>>& programs) {
+inline QByteArray patSection(const QList<std::pair<int, int>>& programs, int version = 0, int sectionNumber = 0,
+                             int lastSectionNumber = 0, bool currentNext = true) {
     QByteArray section;
     section.append(char(0x00));          // table_id
     section.append(char(0xB0));          // section_syntax_indicator, length filled later
     section.append(char(0x00));
     appendU16(&section, 1);              // transport_stream_id
-    section.append(char(0xC1));          // version 0, current_next_indicator
-    section.append(char(0x00));          // section_number
-    section.append(char(0x00));          // last_section_number
+    section.append(static_cast<char>(0xC0 | ((version & 0x1F) << 1) | (currentNext ? 0x01 : 0x00)));
+    section.append(static_cast<char>(sectionNumber));
+    section.append(static_cast<char>(lastSectionNumber));
     for (const auto& [program, pmtPid] : programs) {
         appendU16(&section, program);
         appendU16(&section, 0xE000 | pmtPid);
@@ -61,13 +63,14 @@ inline QByteArray patSection(const QList<std::pair<int, int>>& programs) {
 }
 
 // PMT of one program: (stream_type, elementary PID) pairs.
-inline QByteArray pmtSection(int programNumber, int pcrPid, const QList<std::pair<int, int>>& streams) {
+inline QByteArray pmtSection(int programNumber, int pcrPid, const QList<std::pair<int, int>>& streams,
+                             int version = 0) {
     QByteArray section;
     section.append(char(0x02));          // table_id
     section.append(char(0xB0));
     section.append(char(0x00));
     appendU16(&section, programNumber);
-    section.append(char(0xC1));
+    section.append(static_cast<char>(0xC1 | ((version & 0x1F) << 1)));
     section.append(char(0x00));
     section.append(char(0x00));
     appendU16(&section, 0xE000 | pcrPid);
@@ -109,12 +112,40 @@ inline QByteArray tsPacket(int pid, bool payloadUnitStart, const QByteArray& pay
     return packet;
 }
 
+// The PID of the first TS packet of a payload of 188-octet packets.
+inline int pidOfFirst(const QByteArray& payload) {
+    return payload.size() < 3 ? -1
+                              : ((static_cast<unsigned char>(payload[1]) & 0x1F) << 8) | static_cast<unsigned char>(payload[2]);
+}
+
 // A PSI packet: pointer_field 0 followed by the section.
 inline QByteArray psiPacket(int pid, const QByteArray& section, int continuityCounter = 0) {
     QByteArray payload;
     payload.append(char(0x00));
     payload.append(section);
     return tsPacket(pid, true, payload, continuityCounter);
+}
+
+// A section split over as many packets as it needs: pointer_field 0 in the
+// first packet, then continuation packets, padded with 0xFF.
+inline QList<QByteArray> psiPackets(int pid, const QByteArray& section, int firstContinuityCounter = 0) {
+    QList<QByteArray> packets;
+    QByteArray rest = section;
+    int cc = firstContinuityCounter;
+    bool first = true;
+    while (first || !rest.isEmpty()) {
+        QByteArray payload;
+        if (first) {
+            payload.append(char(0x00));
+        }
+        const int room = 184 - static_cast<int>(payload.size());
+        payload.append(rest.left(room));
+        rest.remove(0, std::min<qsizetype>(room, rest.size()));
+        packets.append(tsPacket(pid, first, payload, cc));
+        cc = (cc + 1) & 0x0F;
+        first = false;
+    }
+    return packets;
 }
 
 // The start of a video PES packet with a PTS (33 bits, 90 kHz).
