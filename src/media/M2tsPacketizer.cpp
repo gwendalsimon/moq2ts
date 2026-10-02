@@ -142,6 +142,7 @@ std::uint32_t mpegCrc32(const char* data, qsizetype size) {
 
 void PsiAssembler::reset() {
     m_section.clear();
+    m_sectionLength = -1;
     m_packets.clear();
     m_collecting = false;
     m_packetRecorded = false;
@@ -187,6 +188,7 @@ QList<PsiAssembler::Section> PsiAssembler::push(const QByteArray& tsPacket, cons
     while (position < size && static_cast<unsigned char>(payload[position]) != 0xFF) {
         m_collecting = true;
         m_section.clear();
+        m_sectionLength = -1;
         m_packets.clear();
         m_packetRecorded = false;
         position += append(payload + position, size - position, sourcePacket, &done);
@@ -200,11 +202,9 @@ QList<PsiAssembler::Section> PsiAssembler::push(const QByteArray& tsPacket, cons
 int PsiAssembler::append(const char* data, int size, const QByteArray& sourcePacket, QList<Section>* done) {
     int used = 0;
     while (used < size && m_collecting) {
-        const int total = m_section.size() < 3
-            ? 3
-            : 3 + (((static_cast<unsigned char>(m_section[1]) & 0x0F) << 8) |
-                   static_cast<unsigned char>(m_section[2]));
-        const int take = std::min(total - static_cast<int>(m_section.size()), size - used);
+        // Up to the 3-octet header first, then up to the section_length it gives.
+        const int target = m_sectionLength < 0 ? 3 : m_sectionLength;
+        const int take = std::min(target - static_cast<int>(m_section.size()), size - used);
         m_section.append(data + used, take);
         used += take;
         if (!m_packetRecorded) {
@@ -214,8 +214,11 @@ int PsiAssembler::append(const char* data, int size, const QByteArray& sourcePac
         if (m_section.size() < 3) {
             continue;
         }
-        const int length = 3 + (((static_cast<unsigned char>(m_section[1]) & 0x0F) << 8) |
-                                static_cast<unsigned char>(m_section[2]));
+        if (m_sectionLength < 0) {
+            m_sectionLength = 3 + (((static_cast<unsigned char>(m_section[1]) & 0x0F) << 8) |
+                                   static_cast<unsigned char>(m_section[2]));
+        }
+        const int length = m_sectionLength;
         if (length > 4096) {
             m_collecting = false;   // longer than any PSI or private section
         } else if (m_section.size() == length) {
@@ -310,7 +313,7 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
         return false;
     }
     // FIFOs, pipes and /dev/stdin are non-seekable; readObject drains a prebuffer
-    // instead of rewinding (see collectInitData).
+    // instead of rewinding (see scanPsi).
     m_sequential = m_file.isSequential();
     if (!detectPacketSize(error)) {
         return false;
@@ -588,11 +591,13 @@ void M2tsPacketizer::refreshInitData() {
     if ((m_transparent && programs != 1) || m_pat.bytes.isEmpty() || m_pmt.bytes.isEmpty()) {
         return;
     }
-    QByteArray initData = m_transparent ? QByteArray() : rewrittenPatPacket(m_pat.sourcePackets.first(), 0);
+    QByteArray initData;
     if (m_transparent) {
         for (const QByteArray& packet : m_pat.sourcePackets) {
             initData += packet;
         }
+    } else {
+        initData = rewrittenPatPacket(m_pat.sourcePackets.first(), 0);
     }
     for (const QByteArray& packet : m_pmt.sourcePackets) {
         initData += packet;
@@ -684,20 +689,22 @@ bool M2tsPacketizer::selectProgramPids(QString* error) {
 }
 
 void M2tsPacketizer::selectPids() {
-    m_selectedPids.clear();
-    m_selectedPids.insert(0x0000);
-    m_selectedPids.insert(m_pmtPid);
+    m_selectedPids.reset();
+    m_selectedPids.set(0x0000);
+    m_selectedPids.set(m_pmtPid);
     if (m_pcrPid >= 0) {
-        m_selectedPids.insert(m_pcrPid);
+        m_selectedPids.set(m_pcrPid);
     }
-    m_selectedPids.insert(m_elementaryPids.begin(), m_elementaryPids.end());
+    for (int pid : m_elementaryPids) {
+        m_selectedPids.set(pid);
+    }
     // Optional SI-table retention (msfts#7 suggestion 1): keep the well-known
     // DVB PSI/SI PIDs (NIT 0x10, SDT/BAT 0x11, EIT 0x12, TDT/TOT 0x14) alongside
     // the selected program.
     if (m_retainSiTables) {
         m_retainedSiPids.clear();
         for (int siPid : {0x0010, 0x0011, 0x0012, 0x0014}) {
-            m_selectedPids.insert(siPid);
+            m_selectedPids.set(siPid);
             m_retainedSiPids.append(siPid);
         }
     }
@@ -750,7 +757,8 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // Live PSI tracking, in every mode: the PAT and the PMT of the selected
         // program update the filter, or end the track. The packet that ends the
         // track is not published.
-        const QByteArray tsView = tsPacketView(packet);
+        // A view of the TS packet, without a copy; packet outlives every use.
+        const QByteArray tsView = QByteArray::fromRawData(packet.constData() + (m_packetSize == 192 ? 4 : 0), 188);
         const int pid = pidOf(tsView);
         if (pid == 0x0000 || pid == m_pmtPid) {
             handlePsiPacket(tsView, packet);
@@ -765,9 +773,9 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             }
             m_leadInDropped = true;
         }
-        // Transparent mode emits every synced packet verbatim (no PID filtering).
+        // Unmodified carriage forwards every synced packet (no PID filtering).
         if (!m_transparent) {
-            const bool selected = m_selectedPids.find(pid) != m_selectedPids.end();
+            const bool selected = m_selectedPids.test(static_cast<std::size_t>(pid));
             const bool keepNull = m_retainNullPackets && pid == 0x1FFF;
             if (!selected && !keepNull) {
                 --index;
@@ -796,14 +804,8 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         return false;
     }
 
-    // One pass over the Object, without copying packets, finds two things:
-    // - MSFTS Group numbering: a new group starts at a random access point. The
-    //   video (PCR) PID is identified from PAT/PMT at open() time; if that scan
-    //   failed (e.g. sequential source), the scan latches onto the first PID
-    //   where the random_access_indicator is observed.
-    // - MSF media timeline (draft-ietf-moq-msf-01 Section 7.1.1): the media time
-    //   of an Object is the PTS of its first media sample, taken from the first
-    //   video PES that starts in it, on the PMT's video PID or the PCR PID.
+    // One pass over the Object: a random access point starts a new Group, and
+    // the first video PES gives the media time (MSF -01 Section 7.1.1).
     bool rapDetected = false;
     object->ptsUs.reset();
     const int ps = m_packetSize;
@@ -826,7 +828,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             continue;
         }
         // Use the known RAP PID if already identified from PAT/PMT or prior latch.
-        // In filtered mode without a known PCR PID, skip non-PCR PIDs.
+        // In per-program carriage with a known PCR PID, skip the other PIDs.
         if (!m_transparent && m_pcrPid >= 0 && pid != m_pcrPid) {
             continue;
         }

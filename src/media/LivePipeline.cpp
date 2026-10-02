@@ -50,12 +50,9 @@ PublishedObject timelineObject(PublishState* st,
     return timeline;
 }
 
-// The one place where a PSI change reaches the catalog. MSF -01 Section 5.3
-// forbids changing a declared track, so the new initData travels in a new
-// independent catalog, the next Group of the catalog track. The MSF editors'
-// copy adds an "update" delta operation and initialization data in an Object
-// property (moq-wg/msf#178, #183); this function is where moq2ts switches to
-// them once MSF -02 and the SDK support them.
+// The one place where a PSI change reaches the catalog: a new independent
+// catalog, because MSF -01 Section 5.3 forbids changing a track. Switch to the
+// "update" operation once MSF -02 and the SDK support it (moq-wg/msf#183).
 PublishedObject updateCatalog(PublishState* st, const QByteArray& initData) {
     st->catalog.initData = initData;
     if (st->catalog.isLive) {
