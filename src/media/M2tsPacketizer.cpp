@@ -640,6 +640,20 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
         endTrack(QStringLiteral("Program %1 left the source PAT; the track ends.").arg(m_programNumber));
         return;
     }
+    if (!listed && !programs.empty()) {
+        // Unmodified-multiplex: the reference program left the PAT. The track
+        // goes on, and the catalog's reference fields are now stale advisory
+        // values. Group boundaries move to the first program still listed,
+        // once its PMT arrives; no PID latches before that.
+        qWarning("Reference program %d left the PAT; Groups now follow program %d, and the catalog's "
+                 "reference program is stale until the track restarts.",
+                 m_programNumber, programs.front().first);
+        m_programNumber = programs.front().first;
+        m_pmtPid = programs.front().second;
+        m_pmtAssembler.reset();
+        m_pmt = {};
+        m_rapPid = kAwaitingPmt;
+    }
     if (listed && pmtPid != m_pmtPid) {
         qWarning("Program %d moved its PMT from PID %d to PID %d.", m_programNumber, m_pmtPid, pmtPid);
         m_pmtPid = pmtPid;
@@ -1076,7 +1090,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             continue;
         }
         // Use the known RAP PID if already identified from PAT/PMT or prior latch.
-        if (m_rapPid < 0) {
+        if (m_rapPid == -1) {
             m_rapPid = pid; // fallback: latch on first RAI PID seen
         }
         rapDetected = pid == m_rapPid;
@@ -1215,7 +1229,7 @@ bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
     if (pid <= 0x001F || pid == 0x1FFF || !hasRandomAccessIndicator(tsPacket)) {
         return false;
     }
-    if (m_rapPid < 0) {
+    if (m_rapPid == -1) {
         m_rapPid = pid;   // fallback: latch on the first PID with the indicator
     }
     return pid == m_rapPid;

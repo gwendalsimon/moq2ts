@@ -657,6 +657,29 @@ int main() {
         ok &= expect(writeFile(path, ts), "write reference-leaves stream");
         const Run run = publish(path, true);
         ok &= expect(run.error.isEmpty() && run.packets.size() == 5, "multiplex: the track goes on");
+
+        // Groups go on, on the video of the first program still listed, once its
+        // PMT arrives. An audio indicator before that PMT starts no Group.
+        const auto rap = [](int pid, int cc) { return tb::tsPacket(pid, true, tb::pesHeaderWithPts(9000 * cc), cc, 0x40); };
+        QByteArray moved = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        moved += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + rap(0x100, 0) + rap(0x100, 1);
+        moved += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1), 1) + rap(0x201, 0);
+        moved += tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}, {0x0F, 0x201}})) + rap(0x200, 0) + rap(0x200, 1);
+        const QString movedPath = dir.filePath("reference-moves.ts");
+        ok &= expect(writeFile(movedPath, moved), "write reference-moves stream");
+        M2tsPacketizer packetizer(movedPath);
+        packetizer.setTransparent(true);
+        QString error;
+        ok &= expect(packetizer.open(0, &error), "reference moves: opens");
+        M2tsObject object;
+        QList<int> groupPids;
+        while (packetizer.readObject(1, &object, &error)) {
+            if (object.startsGroup) {
+                groupPids.append(pidOfPacket(object.payload));
+            }
+        }
+        ok &= expect(groupPids == QList<int>({0x100, 0x100, 0x200, 0x200}),
+                     "multiplex: Groups follow the next program's video after the reference program leaves");
     }
 
     // Groups longer than 2 seconds give one warning; Groups 2 seconds apart do

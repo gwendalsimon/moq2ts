@@ -258,6 +258,9 @@ private:
     bool m_sawFirstRap = false;
     // The PID on which we trigger group boundaries. Set to the first PID where
     // random_access_indicator is observed; in practice this is the video PID.
+    // -1: latch on the first PID with a random access indicator. kAwaitingPmt:
+    // wait for the PMT of a new reference program, and latch on nothing.
+    static constexpr int kAwaitingPmt = -2;
     int m_rapPid = -1;
 
     // Carriage-profile state (msfts#7).
