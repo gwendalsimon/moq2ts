@@ -728,6 +728,14 @@ SectionRewriter::Decision M2tsPacketizer::rewriteCat(const QByteArray& section) 
     // An EMM stream belongs to a CA system, so the entries of the carried
     // program are the CA_descriptors of the CA systems that its ECMs use
     // (draft "Per-Program": SHOULD rewrite the CAT). Other descriptors stay.
+    // A program that uses no CA system needs no CAT.
+    if (m_caSystems.empty()) {
+        if (!m_emmPids.empty()) {
+            m_emmPids.clear();
+            selectPids();
+        }
+        return SectionRewriter::Decision{};
+    }
     const int end = static_cast<int>(section.size()) - 4;
     QByteArray kept;
     std::set<int> emmPids;

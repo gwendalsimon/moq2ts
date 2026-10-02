@@ -514,6 +514,15 @@ int main() {
                      "CA: CAT lists only the program's CA system, version 0 on repeat, valid CRC_32");
         ok &= expect(cats.value(2) == tb::catSection(tb::caDescriptor(0x0B00, 0x700) + tb::caDescriptor(0x0B00, 0x703), 1),
                      "CA: the changed CAT moves to version 1");
+
+        // A clear program of the same multiplex gets no CAT and no CA PIDs.
+        QByteArray clear = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {3, 0x1003}}));
+        clear += tb::psiPacket(0x1003, tb::pmtSection(3, 0x300, {{0x1B, 0x300}}));
+        clear += tb::psiPacket(0x0001, catBytes) + data(0x700, 0) + data(0x300, 0);
+        const QString clearPath = dir.filePath("clear-in-scrambled.ts");
+        ok &= expect(writeFile(clearPath, clear), "write clear-program stream");
+        ok &= expect(pids(publish(clearPath, false, 3)) == QList<int>({0x0000, 0x1003, 0x300}),
+                     "CA: a clear program gets no CAT and no EMM");
     }
 
     // SI rewrite with --retain-si: the SDT actual keeps the carried service in
