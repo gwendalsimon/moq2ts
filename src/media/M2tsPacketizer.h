@@ -60,6 +60,9 @@ private:
     int m_lastCc = -1;
 };
 
+// section_number of the section that starts in a 188-octet TS packet, or -1.
+int startingSectionNumber(const QByteArray& tsPacket);
+
 // PTS of a PES packet that starts in a 188-octet TS packet, in 90 kHz units.
 // Returns -1 when the packet starts no PES packet or the header carries no PTS.
 std::int64_t pesPts(const QByteArray& tsPacket);
@@ -156,7 +159,11 @@ private:
     // program, and what they list.
     PsiAssembler m_patAssembler;
     PsiAssembler m_pmtAssembler;
-    PsiAssembler::Section m_pat;
+    PsiAssembler::Section m_pat;   // all sections of the PAT, in order
+    // The sections of a PAT version still being collected.
+    std::map<int, PsiAssembler::Section> m_patParts;
+    int m_patPartsVersion = -1;
+    int m_patPartsLast = -1;
     PsiAssembler::Section m_pmt;
     std::vector<std::pair<int, int>> m_patPrograms;
     int m_networkPid = -1;

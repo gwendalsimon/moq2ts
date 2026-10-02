@@ -231,6 +231,18 @@ int PsiAssembler::append(const char* data, int size, const QByteArray& sourcePac
     return used;
 }
 
+int startingSectionNumber(const QByteArray& tsPacket) {
+    // The section_number of the section that starts in a packet with
+    // payload_unit_start_indicator set, or -1 when its header is not in the
+    // packet.
+    const int offset = payloadOffset(tsPacket);
+    if (offset < 0 || !payloadUnitStart(tsPacket)) {
+        return -1;
+    }
+    const int start = offset + 1 + static_cast<unsigned char>(tsPacket[offset]);
+    return start + 6 < tsPacket.size() ? static_cast<unsigned char>(tsPacket[start + 6]) : -1;
+}
+
 std::int64_t pesPts(const QByteArray& tsPacket) {
     if (!payloadUnitStart(tsPacket)) {
         return -1;
@@ -444,12 +456,46 @@ void M2tsPacketizer::handlePsiPacket(const QByteArray& tsPacket, const QByteArra
 }
 
 void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
+    // A section with current_next_indicator 0 announces a table that does not
+    // apply yet (ISO/IEC 13818-1 Section 2.4.4).
+    if (section.bytes.size() < 12 || (static_cast<unsigned char>(section.bytes[5]) & 0x01) == 0) {
+        return;
+    }
+    // A large PAT spans several sections. It applies once sections 0 to
+    // last_section_number of one version_number are in.
+    const int version = (static_cast<unsigned char>(section.bytes[5]) >> 1) & 0x1F;
+    const int number = static_cast<unsigned char>(section.bytes[6]);
+    const int last = static_cast<unsigned char>(section.bytes[7]);
+    if (version != m_patPartsVersion || last != m_patPartsLast) {
+        m_patParts.clear();
+        m_patPartsVersion = version;
+        m_patPartsLast = last;
+    }
+    if (number > last) {
+        return;
+    }
+    m_patParts[number] = section;
+    if (static_cast<int>(m_patParts.size()) != last + 1) {
+        return;
+    }
+    PsiAssembler::Section table;
     std::vector<std::pair<int, int>> programs;
     int networkPid = -1;
-    if (section.bytes == m_pat.bytes || !parsePat(section.bytes, &programs, &networkPid)) {
-        return;   // a repeat, or not a PAT
+    for (const auto& [index, part] : m_patParts) {
+        std::vector<std::pair<int, int>> partPrograms;
+        int partNetworkPid = -1;
+        if (!parsePat(part.bytes, &partPrograms, &partNetworkPid)) {
+            return;   // not a PAT
+        }
+        programs.insert(programs.end(), partPrograms.begin(), partPrograms.end());
+        networkPid = partNetworkPid >= 0 ? partNetworkPid : networkPid;
+        table.bytes += part.bytes;
+        table.sourcePackets += part.sourcePackets;
     }
-    m_pat = section;
+    if (table.bytes == m_pat.bytes) {
+        return;   // a repeat
+    }
+    m_pat = table;
     m_patPrograms = programs;
     m_networkPid = networkPid;
     m_patProgramCount = static_cast<int>(programs.size());
@@ -500,7 +546,9 @@ void M2tsPacketizer::endTrack(const QString& reason) {
 
 void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     // A PMT PID can carry the PMTs of several programs; keep the selected one.
-    if (section.bytes == m_pmt.bytes || section.bytes.size() < 5 ||
+    // A section with current_next_indicator 0 does not apply yet.
+    if (section.bytes == m_pmt.bytes || section.bytes.size() < 12 ||
+        (static_cast<unsigned char>(section.bytes[5]) & 0x01) == 0 ||
         ((static_cast<unsigned char>(section.bytes[3]) << 8) | static_cast<unsigned char>(section.bytes[4])) !=
             m_programNumber) {
         return;
@@ -725,12 +773,12 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
                 --index;
                 continue;
             }
-            // One rewritten PAT packet takes the place of the first packet of
-            // each source PAT, which keeps the source repetition rate. The other
-            // packets of a long source PAT go. PID 0 gets its own continuity
+            // One rewritten PAT packet takes the place of the packet that starts
+            // section 0 of each source PAT, which keeps the source repetition
+            // rate. The other packets of a long source PAT go. PID 0 gets its own continuity
             // counter.
             if (pid == 0x0000) {
-                if (!payloadUnitStart(tsView)) {
+                if (!payloadUnitStart(tsView) || startingSectionNumber(tsView) > 0) {
                     --index;
                     continue;
                 }

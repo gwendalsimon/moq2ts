@@ -45,15 +45,16 @@ inline QByteArray finishSection(QByteArray section) {
 }
 
 // PAT listing (program_number, PMT PID) pairs.
-inline QByteArray patSection(const QList<std::pair<int, int>>& programs, int version = 0) {
+inline QByteArray patSection(const QList<std::pair<int, int>>& programs, int version = 0, int sectionNumber = 0,
+                             int lastSectionNumber = 0, bool currentNext = true) {
     QByteArray section;
     section.append(char(0x00));          // table_id
     section.append(char(0xB0));          // section_syntax_indicator, length filled later
     section.append(char(0x00));
     appendU16(&section, 1);              // transport_stream_id
-    section.append(static_cast<char>(0xC1 | ((version & 0x1F) << 1)));          // version 0, current_next_indicator
-    section.append(char(0x00));          // section_number
-    section.append(char(0x00));          // last_section_number
+    section.append(static_cast<char>(0xC0 | ((version & 0x1F) << 1) | (currentNext ? 0x01 : 0x00)));
+    section.append(static_cast<char>(sectionNumber));
+    section.append(static_cast<char>(lastSectionNumber));
     for (const auto& [program, pmtPid] : programs) {
         appendU16(&section, program);
         appendU16(&section, 0xE000 | pmtPid);

@@ -300,6 +300,58 @@ int main() {
         ok &= expect(run.error.contains("left the source PAT"), "program leaves: the track ends with a reason");
     }
 
+    // A "next" PAT (current_next_indicator 0) without the program does not
+    // apply yet, so the per-program track goes on.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1, 0, 0, false), 1) + video;
+        const QString path = dir.filePath("next-pat.ts");
+        ok &= expect(writeFile(path, ts), "write next-PAT stream");
+        const Run run = publish(path, false, 1);
+        ok &= expect(run.error.isEmpty() && pids(run).count(0x100) == 2, "next PAT: the track goes on");
+    }
+
+    // A PAT in two sections applies once both are in. Program 2, listed in the
+    // second section only, opens and is not taken as absent.
+    {
+        const QByteArray video = tb::tsPacket(0x200, false, QByteArray(184, char(0)));
+        QByteArray ts;
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}, 0, 0, 1), 2 * repeat);
+            ts += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 0, 1, 1), 2 * repeat + 1);
+            ts += tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}}), repeat) + video;
+        }
+        const QString path = dir.filePath("two-section-pat.ts");
+        ok &= expect(writeFile(path, ts), "write two-section PAT stream");
+        const Run run = publish(path, false, 2);
+        ok &= expect(run.error.isEmpty() && pids(run).count(0x200) == 2, "two-section PAT: program 2 runs");
+        ok &= expect(pids(run).count(0x0000) == 2, "two-section PAT: one rewritten PAT per source PAT");
+    }
+
+    // The rewritten PAT keeps version 0 when another program moves its PMT.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1101}}, 1), 1) + video;
+        const QString path = dir.filePath("other-program-moves.ts");
+        ok &= expect(writeFile(path, ts), "write other-program stream");
+        const Run run = publish(path, false, 1);
+        moq2ts::PsiAssembler assembler;
+        QList<QByteArray> pats;
+        for (const QByteArray& packet : run.packets) {
+            if (pidOfPacket(packet) == 0) {
+                for (const auto& section : assembler.push(packet, packet)) {
+                    pats.append(section.bytes);
+                }
+            }
+        }
+        ok &= expect(pats.size() == 2 && pats.at(0) == tb::patSection({{1, 0x1000}}, 0) && pats.at(1) == pats.at(0),
+                     "rewritten PAT: version 0 when another program changes");
+    }
+
     // Live PSI tracking: an unmodified-program source that becomes an MPTS ends
     // the track, because its mode is no longer true. A repeated PAT does not.
     {
