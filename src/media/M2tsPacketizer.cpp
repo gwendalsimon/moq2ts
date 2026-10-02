@@ -719,6 +719,9 @@ SectionRewriter::Decision M2tsPacketizer::rewriteSdt(const QByteArray& section) 
     // the carried service becomes the only section (section_number and
     // last_section_number 0); the others go.
     const int end = static_cast<int>(section.size()) - 4;
+    const int version = (static_cast<unsigned char>(section[5]) >> 1) & 0x1F;
+    const int number = static_cast<unsigned char>(section[6]);
+    const int last = static_cast<unsigned char>(section[7]);
     for (int offset = 11; offset + 5 <= end;) {
         const int serviceId = (static_cast<unsigned char>(section[offset]) << 8) | static_cast<unsigned char>(section[offset + 1]);
         const int loopLength = ((static_cast<unsigned char>(section[offset + 3]) & 0x0F) << 8) |
@@ -727,6 +730,7 @@ SectionRewriter::Decision M2tsPacketizer::rewriteSdt(const QByteArray& section) 
             break;
         }
         if (serviceId == m_programNumber) {
+            m_sdtServiceVersion = version;
             QByteArray rewritten = section.left(11) + section.mid(offset, 5 + loopLength) + QByteArray(4, char(0));
             rewritten[6] = char(0x00);   // section_number
             rewritten[7] = char(0x00);   // last_section_number
@@ -736,6 +740,13 @@ SectionRewriter::Decision M2tsPacketizer::rewriteSdt(const QByteArray& section) 
             return SectionRewriter::Decision{SectionRewriter::Decision::Replace, rewritten};
         }
         offset += 5 + loopLength;
+    }
+    // In DVB the service_id equals the program_number. Say once when no
+    // section of an SDT version lists the service, so that the SDT goes.
+    if (number == last && m_sdtServiceVersion != version && !m_warnedSdtNoService) {
+        m_warnedSdtNoService = true;
+        qWarning("An SDT section lists no service %d; it is dropped. In DVB the service_id equals the "
+                 "program_number.", m_programNumber);
     }
     return SectionRewriter::Decision{};
 }
@@ -770,6 +781,7 @@ SectionRewriter::Decision M2tsPacketizer::rewriteCat(const QByteArray& section) 
         }
         offset += 2 + length;
     }
+    // Side effect: the EMM PIDs of the kept descriptors join the PID filter.
     if (emmPids != m_emmPids) {
         m_emmPids = emmPids;
         selectPids();
@@ -949,7 +961,7 @@ void M2tsPacketizer::selectPids() {
     for (int pid : m_emmPids) {
         m_selectedPids.set(pid);
     }
-    // Optional SI-table retention (msfts#7 suggestion 1): keep the well-known
+    // Optional SI-table retention (draft "Per-Program"): keep the well-known
     // DVB PSI/SI PIDs (NIT 0x10, SDT/BAT 0x11, EIT 0x12, TDT/TOT 0x14) alongside
     // the selected program.
     if (m_retainSiTables) {
@@ -1125,6 +1137,23 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     return true;
 }
 
+QByteArray M2tsPacketizer::lookAheadPacket(qsizetype offset) {
+    // A non-seekable source keeps every packet read in the prebuffer, so
+    // readObject still publishes it. A seekable one is read in order from its
+    // current position.
+    if (!m_sequential) {
+        return m_file.read(m_packetSize);
+    }
+    while (offset + m_packetSize > m_prebuffer.size()) {
+        const QByteArray packet = m_file.read(m_packetSize);
+        if (packet.size() != m_packetSize) {
+            return {};
+        }
+        m_prebuffer += packet;
+    }
+    return m_prebuffer.mid(offset, m_packetSize);
+}
+
 bool M2tsPacketizer::findRandomAccess() {
     // Looks ahead on a live source, up to 20,000 packets (about 2 seconds at
     // 10 Mbit/s), for the first random access point. The packets read stay in
@@ -1132,14 +1161,11 @@ bool M2tsPacketizer::findRandomAccess() {
     constexpr int maxPackets = 20000;
     const int savedRapPid = m_rapPid;
     for (qsizetype offset = 0; offset < qsizetype{maxPackets} * m_packetSize; offset += m_packetSize) {
-        if (offset + m_packetSize > m_prebuffer.size()) {
-            const QByteArray packet = m_file.read(m_packetSize);
-            if (packet.size() != m_packetSize) {
-                break;
-            }
-            m_prebuffer += packet;
+        const QByteArray packet = lookAheadPacket(offset);
+        if (packet.size() != m_packetSize) {
+            break;
         }
-        const QByteArray tsPacket = tsPacketView(m_prebuffer.mid(offset, m_packetSize));
+        const QByteArray tsPacket = tsPacketView(packet);
         if (startsRandomAccess(pidOf(tsPacket), tsPacket)) {
             return true;
         }
@@ -1172,18 +1198,8 @@ void M2tsPacketizer::measureMuxRate() {
     int firstIndex = 0;
     int lastIndex = 0;
     int nullPackets = 0;
-    qsizetype bufferOffset = 0;
     for (int index = 0; index < maxPackets && elapsed < pcrHz; ++index) {
-        QByteArray packet;
-        if (m_sequential && bufferOffset < m_prebuffer.size()) {
-            packet = m_prebuffer.mid(bufferOffset, m_packetSize);
-        } else {
-            packet = m_file.read(m_packetSize);
-            if (m_sequential && packet.size() == m_packetSize) {
-                m_prebuffer += packet;
-            }
-        }
-        bufferOffset += m_packetSize;
+        const QByteArray packet = lookAheadPacket(qsizetype{index} * m_packetSize);
         if (packet.size() != m_packetSize || !packetHasSync(packet)) {
             break;
         }

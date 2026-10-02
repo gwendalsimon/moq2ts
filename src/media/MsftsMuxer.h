@@ -22,6 +22,8 @@ struct MsftsCatalog {
     int packetSize = 188;
     // Encoder-only knob (source packets per Object); not a catalog field.
     int packetsPerObject = 7;
+    // The carried program, or in unmodified-multiplex the reference program,
+    // named in the catalog only when pcrPid >= 0.
     int programNumber = 1;
     int pcrPid = -1;
     // draft-gregoire-moq-msfts mpeg2tsSiPids: SI table PIDs retained in the
@@ -55,8 +57,7 @@ struct MsftsCatalog {
     // filtering.
     Mpeg2tsMode mode = Mpeg2tsMode::PerProgram;
     // Advisory source constant mux rate in bits/s. Emitted as mpeg2tsMuxRate
-    // only when > 0 and the mode is not UnmodifiedMultiplex. In that mode,
-    // programNumber and pcrPid name the reference program, when pcrPid >= 0.
+    // only when > 0 and the mode is not UnmodifiedMultiplex.
     qint64 mpeg2tsMuxRateBps = 0;
 
     // MSF common track/root fields (draft-ietf-moq-msf-01).

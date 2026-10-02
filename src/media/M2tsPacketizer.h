@@ -186,6 +186,8 @@ private:
     bool packetHasSync(const QByteArray& packet) const;
     QByteArray tsPacketView(const QByteArray& sourcePacket) const;
     bool hasRandomAccessIndicator(const QByteArray& tsPacket) const;
+    // The packet at offset of a look-ahead from the start of the source.
+    QByteArray lookAheadPacket(qsizetype offset);
     // Live source: whether a random access point comes within the look-ahead.
     bool findRandomAccess();
     // True for the first TS packet of a random access point on the group PID.
@@ -224,6 +226,8 @@ private:
     SectionRewriter m_catRewriter;
     // With --retain-si: the SDT and the EIT reduced to the carried service.
     SectionRewriter m_sdtRewriter;
+    int m_sdtServiceVersion = -1;   // last SDT version that listed the service
+    bool m_warnedSdtNoService = false;
     SectionRewriter m_eitRewriter;
 
     // The rewritten PAT of per-program carriage.

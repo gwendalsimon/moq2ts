@@ -186,6 +186,11 @@ no longer produced.
 
 ## Notes
 
+- **Start-up look-ahead.** Before a live track starts, moq2ts may read ahead
+  in the source: up to 20,000 packets for the first random access point, and
+  up to one second of PCR time to measure the mux rate. On a live source this
+  delays the start by up to a few seconds. The packets read are published.
+
 - **Live stream = live catalog.** A non-seekable source (FIFO/stdin) is detected
   automatically and advertised as `isLive: true`; VOD duration probing is skipped
   (it would otherwise open and consume the pipe a second time).

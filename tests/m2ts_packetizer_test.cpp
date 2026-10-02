@@ -682,6 +682,22 @@ int main() {
                      "multiplex: Groups follow the next program's video after the reference program leaves");
     }
 
+    // An SDT that never lists the service is dropped, with one warning.
+    {
+        const QByteArray sdt = tb::longSection(0x42, 1, tb::sdtBody(0x22, {{7, {}}}));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        ts += tb::psiPacket(0x0011, sdt, 0) + tb::psiPacket(0x0011, sdt, 1);
+        const QString path = dir.filePath("sdt-no-service.ts");
+        ok &= expect(writeFile(path, ts), "write SDT-without-service stream");
+        qInstallMessageHandler(captureWarning);
+        warnings().clear();
+        const Run run = publish(path, false, 0, true);
+        qInstallMessageHandler(nullptr);
+        ok &= expect(!pids(run).contains(0x0011) && warnings().filter("lists no service").size() == 1,
+                     "SDT without the service: dropped, one warning");
+    }
+
     // Groups longer than 2 seconds give one warning; Groups 2 seconds apart do
     // not.
     {

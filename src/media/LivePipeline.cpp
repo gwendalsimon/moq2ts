@@ -349,10 +349,13 @@ void LivePipeline::runLoop() {
     // Draft "Mux Rate": a per-program track without null packets SHOULD
     // declare mpeg2tsMuxRate. Say why when it cannot.
     if (!m_config.transparentMode && !m_config.retainNullPackets && catalogSpec.mpeg2tsMuxRateBps <= 0) {
-        emit status(packetizer.patProgramCount() > 1
-            ? QStringLiteral("warn: no mpeg2tsMuxRate; for a program of a multi-program source, give --mux-rate, "
-                             "at least the peak rate of the program.")
-            : QStringLiteral("warn: no mpeg2tsMuxRate: %1. Give --mux-rate to declare one.").arg(packetizer.muxRateNote()));
+        if (packetizer.patProgramCount() > 1) {
+            qWarning("No mpeg2tsMuxRate: for a program of a multi-program source, give --mux-rate, at least "
+                     "the peak rate of the program.");
+        } else {
+            qWarning("No mpeg2tsMuxRate: %s. Give --mux-rate to declare one.",
+                     qUtf8Printable(packetizer.muxRateNote()));
+        }
     }
     const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
 
