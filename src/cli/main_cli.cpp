@@ -27,6 +27,7 @@
 #ifdef MOQ2TS_HAS_SRT
 #include <unistd.h>
 
+#include "media/SourceGapLog.h"
 #include "media/SrtSource.h"
 #endif
 
@@ -129,18 +130,24 @@ int main(int argc, char** argv) {
     // Objectization.
     addValue(QStringLiteral("fragment-ms"), QStringLiteral("Fragment/group cadence (ms)."), QStringLiteral("ms"), QStringLiteral("250"));
     addValue(QStringLiteral("segment-bytes"), QStringLiteral("Target object size (bytes)."), QStringLiteral("bytes"), QStringLiteral("65536"));
-    addValue(QStringLiteral("program"), QStringLiteral("MPEG program number (0 = first)."), QStringLiteral("n"), QStringLiteral("0"));
+    addValue(QStringLiteral("program"), QStringLiteral("MPEG program number. Per-program: the program to carry (0 = first). "
+                                                        "Unmodified multiplex: the reference program that the catalog "
+                                                        "names (0 = none)."),
+             QStringLiteral("n"), QStringLiteral("0"));
     // MSFTS carriage-profile options (msfts#7).
     addValue(QStringLiteral("mux-rate"), QStringLiteral("Advisory source mux rate (bits/s); 0 omits the catalog hint. Dropped when an unmodified source lists several programs."),
              QStringLiteral("bps"), QStringLiteral("0"));
     // --transparent is the original name, kept so existing scripts still work.
-    parser.addOption(QCommandLineOption(QStringList{QStringLiteral("unmodified"), QStringLiteral("transparent")},
+    // --publish-multiplex names the SRT carriage choice (draft "Unmodified Multiplex").
+    parser.addOption(QCommandLineOption(QStringList{QStringLiteral("unmodified"), QStringLiteral("transparent"),
+                                                    QStringLiteral("publish-multiplex")},
         QStringLiteral("Unmodified carriage: forward every source packet unchanged. The track is "
                        "unmodified-program for a single-program source and unmodified-multiplex "
-                       "otherwise. --transparent is an alias.")));
+                       "otherwise. --transparent and --publish-multiplex are aliases; SRT ingest "
+                       "uses this carriage by default.")));
     parser.addOption(QCommandLineOption(QStringLiteral("paced"),
         QStringLiteral("Pace file-source publishing at media-time rate (prevents dumping all data at wire speed).")));
-    addValue(QStringLiteral("draft"), QStringLiteral("MOQ draft version (14 or 16)."),
+    addValue(QStringLiteral("draft"), QStringLiteral("MOQ draft version: 14, 16, 17 or 18. The relay must list it."),
              QStringLiteral("version"), QStringLiteral("16"));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-si"),
         QStringLiteral("Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT), with the SDT and EIT reduced to the carried service.")));
@@ -178,6 +185,12 @@ int main(int argc, char** argv) {
     cfg.transparentMode = parser.isSet(QStringLiteral("unmodified"));
     cfg.pacedFileSource = parser.isSet(QStringLiteral("paced"));
     cfg.draftVersion = parser.value(QStringLiteral("draft")).toInt();
+    if (!moq2ts::MoqxrPublisher::supportsDraft(cfg.draftVersion)) {
+        logLine(stderr, "error", QStringLiteral("--draft %1 is not supported; use %2.")
+                                     .arg(parser.value(QStringLiteral("draft")),
+                                          moq2ts::MoqxrPublisher::supportedDrafts()));
+        return 2;
+    }
     cfg.retainSiTables = parser.isSet(QStringLiteral("retain-si"));
     cfg.retainNullPackets = parser.isSet(QStringLiteral("retain-null"));
 
@@ -264,9 +277,15 @@ int main(int argc, char** argv) {
         // Point the video source at the read end of the pipe
         cfg.videoSource = QStringLiteral("/dev/fd/%1").arg(srtPipeFds[0]);
 
-        // Start the SRT receive thread
-        srtThread = std::make_unique<std::thread>([srtSock, writeFd = srtPipeFds[1], &srtStop]() {
-            moq2ts::SrtSource::receiveLoop(srtSock, writeFd, srtStop);
+        // Start the SRT receive thread. After a drop it resyncs on the PID
+        // whose random access points start Groups, which the pipeline sets.
+        auto resyncPid = std::make_shared<std::atomic<int>>(-1);
+        cfg.resyncPid = resyncPid;
+        // The packetizer starts a Group where the receive thread skipped ahead.
+        auto sourceGaps = std::make_shared<moq2ts::SourceGapLog>();
+        cfg.sourceGaps = sourceGaps;
+        srtThread = std::make_unique<std::thread>([srtSock, writeFd = srtPipeFds[1], &srtStop, resyncPid, sourceGaps]() {
+            moq2ts::SrtSource::receiveLoop(srtSock, writeFd, srtStop, resyncPid.get(), sourceGaps.get());
             ::close(writeFd); // close write end to signal EOF to reader
         });
 
@@ -297,16 +316,6 @@ int main(int argc, char** argv) {
         cfg.transparentMode = true;
     }
 #endif  // MOQ2TS_HAS_SRT
-
-    // The draft forbids mpeg2tsMuxRate in unmodified-multiplex mode, so the
-    // catalog drops it; say so rather than accepting a value that does nothing.
-    // Whether an unmodified source is a multiplex is known only once its PAT
-    // is read, so the warning names the condition.
-    if (cfg.transparentMode && cfg.mpeg2tsMuxRateBps > 0) {
-        logLine(stderr, "warn",
-                QStringLiteral("--mux-rate is ignored in unmodified publishing when the source "
-                               "PAT lists several programs (unmodified-multiplex)."));
-    }
 
     // Validation mirrors the GUI guards.
     const bool hasSource = useSrt || !cfg.videoSource.isEmpty() || !cfg.audioSource.isEmpty() ||

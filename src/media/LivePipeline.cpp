@@ -50,6 +50,36 @@ PublishedObject timelineObject(PublishState* st,
     return timeline;
 }
 
+// The MSF bitrate of a TS-source track (MSF -01 Section 5.2.22): its maximum
+// bitrate, which MUST be given for a video track. A TS source is not encoded
+// here, so the value comes from the stream, in order of certainty:
+//   1. the measured rate, when it is constant: an unmodified track of a source
+//      with null stuffing carries a constant rate, so its rate is its maximum;
+//   2. the mux rate, --mux-rate or the one measured for a single-program
+//      source: no track derived from the source exceeds it;
+//   3. the rate measured over the first second, an average that a VBR track
+//      can exceed;
+//   4. the --video-bitrate setting, which only the capture path encodes to.
+qint64 trackMaxBitrate(const M2tsPacketizer& packetizer, const PublishConfig& config) {
+    if (packetizer.measuredBitrate() > 0 && packetizer.measuredBitrateIsConstant()) {
+        return packetizer.measuredBitrate();
+    }
+    if (config.mpeg2tsMuxRateBps > 0) {
+        return config.mpeg2tsMuxRateBps;
+    }
+    if (packetizer.measuredMuxRate() > 0) {
+        return packetizer.measuredMuxRate();
+    }
+    if (packetizer.measuredBitrate() > 0) {
+        qWarning("The catalog bitrate is the rate measured over the first second of the source; the track can "
+                 "exceed it, and MSF declares a maximum. Give --mux-rate to declare an upper bound.");
+        return packetizer.measuredBitrate();
+    }
+    qWarning("The catalog bitrate is the --video-bitrate setting: no rate could be measured from the PCR. "
+             "Give --mux-rate to declare the rate of the source.");
+    return static_cast<qint64>(config.videoTargetBitrateKbps) * 1000;
+}
+
 // The one place where a PSI change reaches the catalog: a new independent
 // catalog, because MSF -01 Section 5.3 forbids changing a track. Switch to the
 // "update" operation once MSF -02 and the SDK support it (moq-wg/msf#183).
@@ -289,6 +319,7 @@ void LivePipeline::runLoop() {
     packetizer.setTransparent(m_config.transparentMode);
     packetizer.setRetainSiTables(m_config.retainSiTables);
     packetizer.setRetainNullPackets(m_config.retainNullPackets);
+    packetizer.setSourceGaps(m_config.sourceGaps);
     QString packetizerError;
     if (!packetizer.open(m_config.programNumber, &packetizerError)) {
         emit error(packetizerError);
@@ -297,8 +328,19 @@ void LivePipeline::runLoop() {
     }
 
     const int packetsPerObject = std::max(1, m_config.targetSegmentBytes / packetizer.packetSize());
-    // Track name defaults to "program-1" when not supplied by other means.
-    const QString trackName = QStringLiteral("program-1");
+    // Unmodified carriage: unmodified-program for a one-program PAT,
+    // unmodified-multiplex otherwise. open() fails without a PAT.
+    const Mpeg2tsMode mode = !m_config.transparentMode             ? Mpeg2tsMode::PerProgram
+                             : packetizer.patProgramCount() == 1   ? Mpeg2tsMode::UnmodifiedProgram
+                                                                   : Mpeg2tsMode::UnmodifiedMultiplex;
+    const bool multiplex = mode == Mpeg2tsMode::UnmodifiedMultiplex;
+    // A multiplex is named mux-1 (draft "Unmodified Multiplex" example). With a
+    // reference program the name carries it: a declared track cannot change
+    // its program number (draft "Catalog"), so another reference needs another
+    // name.
+    const QString trackName = !multiplex                ? QStringLiteral("program-1")
+                              : packetizer.namesProgram() ? QStringLiteral("mux-1-p%1").arg(packetizer.programNumber())
+                                                          : QStringLiteral("mux-1");
     const QString timelineTrackName = trackName + QStringLiteral(".timeline");
     // A non-seekable source (FIFO / stdin / pipe) is a live feed: advertise it as
     // live and skip VOD-only duration probing, which would open and consume the
@@ -310,7 +352,9 @@ void LivePipeline::runLoop() {
         .packetSize = packetizer.packetSize(),
         .packetsPerObject = packetsPerObject,
         .programNumber = packetizer.programNumber(),
-        .pcrPid = packetizer.pcrPid(),
+        // A multiplex names a reference program only when --program gives one;
+        // the catalog then carries no program fields.
+        .pcrPid = packetizer.namesProgram() ? packetizer.pcrPid() : -1,
         // Advertised as mpeg2tsSiPids. Empty unless --retain-si kept the DVB SI
         // PIDs alongside the selected program, which is exactly the case the
         // field describes: tables retained in the filtered track beyond the
@@ -325,14 +369,10 @@ void LivePipeline::runLoop() {
         .namespaceName = m_config.namespaceName,
         .trackDurationMs = fileDurationMs,
         .randomAccess = packetizer.randomAccess(),
-        // Unmodified carriage: unmodified-program for a one-program PAT,
-        // unmodified-multiplex otherwise (an unparsed PAT counts as a multiplex).
-        .mode = !m_config.transparentMode             ? Mpeg2tsMode::PerProgram
-                : packetizer.patProgramCount() == 1   ? Mpeg2tsMode::UnmodifiedProgram
-                                                      : Mpeg2tsMode::UnmodifiedMultiplex,
+        .mode = mode,
         .mpeg2tsMuxRateBps = m_config.mpeg2tsMuxRateBps > 0 ? m_config.mpeg2tsMuxRateBps : packetizer.measuredMuxRate(),
         .isLive = false,
-        .bitrateBps = static_cast<qint64>(m_config.videoTargetBitrateKbps) * 1000,
+        .bitrateBps = trackMaxBitrate(packetizer, m_config),
         // generatedAt is suppressed for VOD by catalogJson (isLive false).
     };
     if (liveStream) {
@@ -357,10 +397,37 @@ void LivePipeline::runLoop() {
                      qUtf8Printable(packetizer.muxRateNote()));
         }
     }
+    if (multiplex) {
+        // The draft forbids mpeg2tsMuxRate in this mode (draft "Mux Rate"), so
+        // the catalog leaves it out. Only now, with the PAT read, is it known.
+        if (m_config.mpeg2tsMuxRateBps > 0) {
+            qWarning("--mux-rate is not declared as mpeg2tsMuxRate: the source PAT lists %d programs, and "
+                     "the draft forbids the field for an unmodified multiplex. It still sets the catalog "
+                     "bitrate.",
+                     packetizer.patProgramCount());
+        }
+        if (packetizer.namesProgram()) {
+            emit status(QStringLiteral("unmodified-multiplex track %1: reference program %2, PCR PID %3.")
+                            .arg(trackName)
+                            .arg(packetizer.programNumber())
+                            .arg(packetizer.pcrPid()));
+        } else {
+            emit status(QStringLiteral("unmodified-multiplex track %1: %2 programs, no reference program "
+                                       "(give --program to name one).")
+                            .arg(trackName)
+                            .arg(packetizer.patProgramCount()));
+        }
+        if (catalogSpec.initData.isEmpty()) {
+            qWarning("The catalog carries no initRef: not every PMT of the multiplex arrived at the start, "
+                     "and a later catalog cannot add initRef to the track.");
+        }
+    }
     const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
+    if (m_config.resyncPid) {
+        m_config.resyncPid->store(packetizer.groupPid(), std::memory_order_relaxed);
+    }
 
-    constexpr std::int64_t kPaceSlackUs = 10000; // 10 ms slack
-    // Shared with the lambda by VALUE, so nothing it touches lives on this frame.
+    constexpr std::int64_t kPaceSlackUs = 10000; // 10 ms slack    // Shared with the lambda by VALUE, so nothing it touches lives on this frame.
     auto st = std::make_shared<PublishState>();
     st->packetizer = packetizerPtr;
     st->catalog = catalogSpec;
@@ -382,6 +449,9 @@ void LivePipeline::runLoop() {
                 emit error(readError);
             }
             return std::nullopt;
+        }
+        if (m_config.resyncPid) {
+            m_config.resyncPid->store(st->packetizer->groupPid(), std::memory_order_relaxed);
         }
 
         PublishedObject published;

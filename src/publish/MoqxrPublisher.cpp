@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <deque>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -78,8 +79,16 @@ std::vector<std::uint8_t> toVector(const QByteArray& bytes) {
     return std::vector<std::uint8_t>(begin, begin + bytes.size());
 }
 
-openmoq::publisher::DraftVersion defaultDraftVersion() {
-    return openmoq::publisher::DraftVersion::kDraft16;
+// --draft to the moqxr DraftVersion. Draft 17 and 18 are in every moqxr
+// release that has DraftVersion beyond 16; later drafts are not used here.
+std::optional<openmoq::publisher::DraftVersion> toDraftVersion(int draft) {
+    switch (draft) {
+    case 14: return openmoq::publisher::DraftVersion::kDraft14;
+    case 16: return openmoq::publisher::DraftVersion::kDraft16;
+    case 17: return openmoq::publisher::DraftVersion::kDraft17;
+    case 18: return openmoq::publisher::DraftVersion::kDraft18;
+    default: return std::nullopt;
+    }
 }
 
 #endif
@@ -149,9 +158,16 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
 
     try {
         openmoq::publisher::PublisherConfig publisherConfig;
-        publisherConfig.draft_version = cfg.draftVersion == 14
-            ? openmoq::publisher::DraftVersion::kDraft14
-            : defaultDraftVersion();
+        // Never fall back to another draft: the relay would refuse it at the
+        // ALPN, with an error that does not name the cause.
+        const std::optional<openmoq::publisher::DraftVersion> draft = toDraftVersion(cfg.draftVersion);
+        if (!draft.has_value()) {
+            emit publishError(QStringLiteral("Unsupported MOQ draft %1; use %2.")
+                                  .arg(cfg.draftVersion)
+                                  .arg(supportedDrafts()));
+            return false;
+        }
+        publisherConfig.draft_version = *draft;
         publisherConfig.track_namespace = cfg.namespaceName.toStdString();
         // Await-subscribe mode: only send data after the relay forwards a
         // SUBSCRIBE from a downstream subscriber. The moqxr library no longer
@@ -368,6 +384,14 @@ void MoqxrPublisher::stop() {
 bool MoqxrPublisher::connected() const {
     QMutexLocker locker(&m_mutex);
     return m_connected;
+}
+
+bool MoqxrPublisher::supportsDraft(int draft) {
+    return draft == 14 || draft == 16 || draft == 17 || draft == 18;
+}
+
+QString MoqxrPublisher::supportedDrafts() {
+    return QStringLiteral("14, 16, 17 or 18");
 }
 
 } // namespace moq2ts

@@ -268,10 +268,14 @@ capture catalog (`per-program`) looks like:
 
 An `--unmodified` track is `unmodified-program` when the source PAT lists one
 program. It then carries `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` like a
-`per-program` track. Otherwise it is `unmodified-multiplex`. Its
-`mpeg2tsProgramNumber` and `mpeg2tsPcrPid` then name a reference program,
-the first of the PAT or the `--program` one, on whose PCR a subscriber paces
-the multiplex. It never carries `mpeg2tsMuxRate` or `mpeg2tsSiPids`.
+`per-program` track. Otherwise it is `unmodified-multiplex`, named `mux-1`.
+With `--program N` it is named `mux-1-pN`, and its `mpeg2tsProgramNumber` and
+`mpeg2tsPcrPid` name N as the reference program, on whose PCR a subscriber
+paces the multiplex. Without `--program` the catalog names no program. The
+initialization data is the source PAT with the PMT of the reference program,
+or of every program without one. It never carries `mpeg2tsMuxRate` or
+`mpeg2tsSiPids`. The track ends when the PAT lists one program, or when the
+reference program leaves it.
 
 Field presence is conditional:
 
@@ -280,11 +284,17 @@ Field presence is conditional:
 - `targetLatency` is present only when `isLive` is true (MSF 5.1.16); `trackDuration`
   is the inverse — VOD only, present only when `isLive` is false and the value is
   positive (MSF 5.1.37).
-- `bitrate` is emitted only when greater than zero.
-- `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` are emitted in every mode when
-  `mpeg2tsPcrPid` is known (PID >= 0), and always outside
-  `unmodified-multiplex`. `mpeg2tsMuxRate` is emitted outside
-  `unmodified-multiplex` when positive.
+- `bitrate` is the MSF maximum bitrate (MSF 5.2.22), which MUST be given for a video
+  track. For a TS source it comes from the stream, in this order: the rate measured
+  from the PCR when it is constant (an unmodified track of a source with null
+  stuffing); else `--mux-rate`; else the mux rate measured for a single-program
+  source; else the rate measured over the first second, with a warning that the
+  track can exceed it; else `--video-bitrate`, with a warning. The capture path
+  declares the `--video-bitrate` it encodes to. It is emitted only when greater
+  than zero.
+- `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` are emitted outside
+  `unmodified-multiplex`, and in it only with `--program`.
+  `mpeg2tsMuxRate` is emitted outside `unmodified-multiplex` when positive.
 - `mpeg2tsSiPids` is emitted only in `per-program` mode.
 - `mpeg2tsTimestampMode` is valid only for 192-octet source packets and MUST
   NOT appear for 188.

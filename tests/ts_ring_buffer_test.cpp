@@ -159,6 +159,33 @@ int main() {
         ok &= expect(ring.at(0) == 0x47, "fallback landed on a packet boundary");
     }
 
+    // --- 4c. A preferred PID: resume at its newest IDR, not at a newer IDR of
+    //      another program; fall back to any IDR after a buffer's worth. -------
+    {
+        TsRingBuffer ring(10 * kPkt);
+        for (int i = 0; i < 12; ++i) {
+            appendPacket(ring, 0x100, false, static_cast<unsigned char>(i));
+        }
+        appendPacket(ring, 0x100, true, 100);   // reference program's IDR
+        appendPacket(ring, 0x100, false, 101);
+        appendPacket(ring, 0x200, true, 200);   // a newer IDR of another program
+        appendPacket(ring, 0x200, false, 201);
+        ok &= expect(ring.resyncToRandomAccess(0x100), "resync on the preferred PID");
+        ok &= expect(ring.at(10) == 100, "resumed at the preferred PID's IDR, not the newer one");
+
+        TsRingBuffer other(4 * kPkt);
+        for (int i = 0; i < 5; ++i) {
+            appendPacket(other, 0x200, false, static_cast<unsigned char>(i));
+        }
+        appendPacket(other, 0x200, true, 50);
+        ok &= expect(!other.resyncToRandomAccess(0x100), "another PID's IDR does not end the wait at once");
+        appendPacket(other, 0x200, false, 60);
+        ok &= expect(!other.resyncToRandomAccess(0x100), "still waiting for the preferred PID");
+        appendPacket(other, 0x200, false, 61);   // a buffer's worth has now been dropped
+        ok &= expect(other.resyncToRandomAccess(0x100) && other.at(10) == 50,
+                     "after a buffer's worth without the preferred PID, any IDR resumes");
+    }
+
     // --- 5. Wrap-around: appends spanning the end of the buffer stay correct. --
     {
         TsRingBuffer ring(4 * kPkt);

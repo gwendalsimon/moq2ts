@@ -111,43 +111,20 @@ public:
 
     // True when the front of the buffer may be emitted. After a drop this skips
     // forward to the next random access point and returns false until one is
-    // buffered, so a consumer never receives an undecodable fragment.
-    bool resyncToRandomAccess() {
+    // buffered, so a consumer never receives an undecodable fragment. With
+    // preferredPid >= 0, only that PID's random access points count until a
+    // whole buffer's worth has passed without one.
+    bool resyncToRandomAccess(int preferredPid = -1) {
         if (!resyncPending_) {
             return true;
         }
-        const std::size_t n = size_;
-        // Scan BACKWARD so we resume at the NEWEST random access point - the live
-        // edge. Resuming at the oldest one would replay everything buffered while
-        // the consumer was away, permanently leaving it seconds behind live (the
-        // buffer holds several seconds by design, to absorb stalls). Searching from
-        // the end also costs less: it stops within one GOP instead of scanning all.
-        if (n >= kTsPacketSize) {
-            for (std::size_t off = n - kTsPacketSize + 1; off-- > 0;) {
-                if (at(off) != 0x47) {
-                    continue;
-                }
-                // Confirm framing against the following packet when it is buffered.
-                if (off + 2 * kTsPacketSize <= n && at(off + kTsPacketSize) != 0x47) {
-                    continue;
-                }
-                const int adaptationControl = (at(off + 3) >> 4) & 0x03;
-                if (adaptationControl < 2) {
-                    continue;  // no adaptation field, so no random_access_indicator
-                }
-                if (at(off + 4) < 1) {
-                    continue;  // empty adaptation field
-                }
-                if ((at(off + 5) & 0x40) == 0) {
-                    continue;  // random_access_indicator clear
-                }
-                consume(off);  // drop the stale backlog ahead of the newest IDR
-                resyncPending_ = false;
-                resyncDropped_ = 0;
-                return true;
-            }
+        if (resumeAtNewestRandomAccess(preferredPid)) {
+            return true;
         }
-
+        if (preferredPid >= 0 && resyncDropped_ >= buf_.size() && resumeAtNewestRandomAccess(-1)) {
+            return true;
+        }
+        const std::size_t n = size_;
         // Safety valve: the buffer stays full for as long as the consumer is
         // stalled, so "full" alone must NOT end the wait - that would resume
         // mid-GOP. Only give up once a whole buffer's worth of data has streamed
@@ -168,6 +145,45 @@ public:
     }
 
 private:
+    // Scan BACKWARD so we resume at the NEWEST random access point - the live
+    // edge. Resuming at the oldest one would replay everything buffered while
+    // the consumer was away, permanently leaving it seconds behind live (the
+    // buffer holds several seconds by design, to absorb stalls). Searching from
+    // the end also costs less: it stops within one GOP instead of scanning all.
+    bool resumeAtNewestRandomAccess(int pid) {
+        const std::size_t n = size_;
+        if (n < kTsPacketSize) {
+            return false;
+        }
+        for (std::size_t off = n - kTsPacketSize + 1; off-- > 0;) {
+            if (at(off) != 0x47) {
+                continue;
+            }
+            // Confirm framing against the following packet when it is buffered.
+            if (off + 2 * kTsPacketSize <= n && at(off + kTsPacketSize) != 0x47) {
+                continue;
+            }
+            if (pid >= 0 && (((at(off + 1) & 0x1F) << 8) | at(off + 2)) != pid) {
+                continue;
+            }
+            const int adaptationControl = (at(off + 3) >> 4) & 0x03;
+            if (adaptationControl < 2) {
+                continue;  // no adaptation field, so no random_access_indicator
+            }
+            if (at(off + 4) < 1) {
+                continue;  // empty adaptation field
+            }
+            if ((at(off + 5) & 0x40) == 0) {
+                continue;  // random_access_indicator clear
+            }
+            consume(off);  // drop the stale backlog ahead of the newest IDR
+            resyncPending_ = false;
+            resyncDropped_ = 0;
+            return true;
+        }
+        return false;
+    }
+
     std::vector<char> buf_;
     std::size_t head_ = 0;      // read position
     std::size_t size_ = 0;      // bytes currently buffered
