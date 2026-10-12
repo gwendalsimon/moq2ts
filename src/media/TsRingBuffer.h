@@ -60,6 +60,7 @@ public:
         }
         head_ = (head_ + n) % buf_.size();
         size_ -= n;
+        headPos_ += n;
     }
 
     // Appends len bytes, discarding the oldest whole TS packets if that is the
@@ -103,6 +104,7 @@ public:
             if (!resyncPending_) {
                 resyncPending_ = true;  // a gap was introduced; re-anchor before emitting
                 resyncDropped_ = 0;
+                resetScan(-1);
             }
             resyncDropped_ += dropped;
         }
@@ -114,14 +116,26 @@ public:
     // buffered, so a consumer never receives an undecodable fragment. With
     // preferredPid >= 0, only that PID's random access points count until a
     // whole buffer's worth has passed without one.
+    //
+    // The receive loop calls this on every pass while a resync is pending, so
+    // it must cost in proportion to the data received since the last call, not
+    // to the buffer size: a scan of the whole buffer per call starved srt_recv()
+    // at high bitrates and turned one drop into a collapse of the SRT link. Each
+    // packet is therefore examined once, and the newest random access points
+    // seen so far are remembered.
     bool resyncToRandomAccess(int preferredPid = -1) {
         if (!resyncPending_) {
             return true;
         }
-        if (resumeAtNewestRandomAccess(preferredPid)) {
+        advanceScan(preferredPid);
+        // Resume at the NEWEST random access point - the live edge. Resuming at
+        // the oldest one would replay everything buffered while the consumer was
+        // away, permanently leaving it seconds behind live (the buffer holds
+        // several seconds by design, to absorb stalls).
+        if (preferredPid >= 0 ? resumeAt(newestPreferredRap_) : resumeAt(newestAnyRap_)) {
             return true;
         }
-        if (preferredPid >= 0 && resyncDropped_ >= buf_.size() && resumeAtNewestRandomAccess(-1)) {
+        if (preferredPid >= 0 && resyncDropped_ >= buf_.size() && resumeAt(newestAnyRap_)) {
             return true;
         }
         const std::size_t n = size_;
@@ -135,8 +149,7 @@ public:
             for (std::size_t off = 0; off + 2 * kTsPacketSize <= n; ++off) {
                 if (at(off) == 0x47 && at(off + kTsPacketSize) == 0x47) {
                     consume(off);
-                    resyncPending_ = false;
-                    resyncDropped_ = 0;
+                    endResync();
                     return true;
                 }
             }
@@ -145,43 +158,74 @@ public:
     }
 
 private:
-    // Scan BACKWARD so we resume at the NEWEST random access point - the live
-    // edge. Resuming at the oldest one would replay everything buffered while
-    // the consumer was away, permanently leaving it seconds behind live (the
-    // buffer holds several seconds by design, to absorb stalls). Searching from
-    // the end also costs less: it stops within one GOP instead of scanning all.
-    bool resumeAtNewestRandomAccess(int pid) {
-        const std::size_t n = size_;
-        if (n < kTsPacketSize) {
+    static constexpr std::uint64_t kNone = ~std::uint64_t{0};
+
+    // Positions below are absolute stream offsets: headPos_ is the offset of
+    // the front byte, so they stay valid as the front moves.
+    void resetScan(int pid) {
+        scanPid_ = pid;
+        scanPos_ = headPos_;
+        scanAligned_ = true;
+        newestPreferredRap_ = kNone;
+        newestAnyRap_ = kNone;
+    }
+
+    void endResync() {
+        resyncPending_ = false;
+        resyncDropped_ = 0;
+        resetScan(-1);
+    }
+
+    // Examines the whole packets appended since the last call, in 188-byte
+    // steps from a packet boundary, and records the newest random access point
+    // on the preferred PID and on any PID.
+    void advanceScan(int pid) {
+        if (pid != scanPid_) {
+            resetScan(pid);   // the preferred PID changed: look at the buffer again
+        }
+        if (scanPos_ < headPos_) {
+            scanPos_ = headPos_;   // drops moved the front past the cursor
+        }
+        const std::uint64_t end = headPos_ + size_;
+        while (scanPos_ + kTsPacketSize <= end) {
+            const std::size_t off = static_cast<std::size_t>(scanPos_ - headPos_);
+            if (at(off) != 0x47) {
+                scanAligned_ = false;   // lost the packet framing: search byte by byte
+                ++scanPos_;
+                continue;
+            }
+            if (!scanAligned_) {
+                // Confirm a sync byte found by search against the next packet.
+                if (scanPos_ + 2 * kTsPacketSize > end) {
+                    return;   // wait until the next packet is buffered
+                }
+                if (at(off + kTsPacketSize) != 0x47) {
+                    ++scanPos_;
+                    continue;
+                }
+                scanAligned_ = true;
+            }
+            const bool randomAccess = ((at(off + 3) >> 4) & 0x03) >= 2   // adaptation field present
+                                      && at(off + 4) >= 1                 // and not empty
+                                      && (at(off + 5) & 0x40) != 0;       // random_access_indicator
+            if (randomAccess) {
+                newestAnyRap_ = scanPos_;
+                if (pid >= 0 && (((at(off + 1) & 0x1F) << 8) | at(off + 2)) == pid) {
+                    newestPreferredRap_ = scanPos_;
+                }
+            }
+            scanPos_ += kTsPacketSize;
+        }
+    }
+
+    // Drops the stale backlog ahead of the random access point at pos.
+    bool resumeAt(std::uint64_t pos) {
+        if (pos == kNone || pos < headPos_) {
             return false;
         }
-        for (std::size_t off = n - kTsPacketSize + 1; off-- > 0;) {
-            if (at(off) != 0x47) {
-                continue;
-            }
-            // Confirm framing against the following packet when it is buffered.
-            if (off + 2 * kTsPacketSize <= n && at(off + kTsPacketSize) != 0x47) {
-                continue;
-            }
-            if (pid >= 0 && (((at(off + 1) & 0x1F) << 8) | at(off + 2)) != pid) {
-                continue;
-            }
-            const int adaptationControl = (at(off + 3) >> 4) & 0x03;
-            if (adaptationControl < 2) {
-                continue;  // no adaptation field, so no random_access_indicator
-            }
-            if (at(off + 4) < 1) {
-                continue;  // empty adaptation field
-            }
-            if ((at(off + 5) & 0x40) == 0) {
-                continue;  // random_access_indicator clear
-            }
-            consume(off);  // drop the stale backlog ahead of the newest IDR
-            resyncPending_ = false;
-            resyncDropped_ = 0;
-            return true;
-        }
-        return false;
+        consume(static_cast<std::size_t>(pos - headPos_));
+        endResync();
+        return true;
     }
 
     std::vector<char> buf_;
@@ -190,6 +234,13 @@ private:
     std::uint64_t dropped_ = 0;    // lifetime bytes discarded
     std::uint64_t resyncDropped_ = 0;  // bytes discarded since the current resync began
     bool resyncPending_ = false;
+    // Incremental resync scan (see resyncToRandomAccess).
+    std::uint64_t headPos_ = 0;         // absolute stream offset of the front byte
+    std::uint64_t scanPos_ = 0;         // next absolute offset to examine
+    bool scanAligned_ = true;
+    int scanPid_ = -1;
+    std::uint64_t newestPreferredRap_ = kNone;
+    std::uint64_t newestAnyRap_ = kNone;
 };
 
 }  // namespace moq2ts

@@ -462,11 +462,12 @@ int main() {
                          live.firstStartsGroup && live.initData == multiplex.left(2 * 188),
                      "live multiplex with --program: starts at the reference program's RAP, declares random access");
         // Without a requested program, it names no reference program: it keeps
-        // its lead-in, declares nothing, and has no initData while the PMT of
-        // program 2 is missing.
+        // its lead-in and declares nothing. Its initData is the PAT and the PMT
+        // of the first program, so the missing PMT of program 2 does not matter.
         const LiveRun unnamed = publishLive(dir.filePath("live-m-unnamed.fifo"), multiplex, true);
-        ok &= expect(!unnamed.randomAccess && unnamed.run.packets.size() == 5 && unnamed.initData.isEmpty(),
-                     "live multiplex without --program: lead-in kept, no random access, no initData");
+        ok &= expect(!unnamed.randomAccess && unnamed.run.packets.size() == 5 &&
+                         unnamed.initData == multiplex.left(2 * 188),
+                     "live multiplex without --program: lead-in kept, no random access, initData of the first program");
         // Without a reference program (no PMT known), it keeps its lead-in and
         // declares nothing.
         QByteArray noReference = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
@@ -936,7 +937,8 @@ int main() {
     // Unmodified multiplex (draft "Unmodified Multiplex", "Use of MSF
     // Initialization Data"): every source packet goes out unchanged, a
     // reference program is named only on request, and initData carries the PAT
-    // with the PMT of the reference program, or of every program without one.
+    // with the PMT of the reference program: the first program in the PAT when
+    // none is named.
     {
         const QByteArray mux = stream({{1, 0x1000}, {2, 0x1001}});
         const QString path = dir.filePath("mux.ts");
@@ -947,7 +949,8 @@ int main() {
         QString error;
         ok &= expect(unnamed.open(0, &error), "multiplex opens: " + error.toStdString());
         ok &= expect(!unnamed.namesProgram() && !unnamed.randomAccess(), "multiplex without --program names no program");
-        ok &= expect(unnamed.initData() == mux.left(3 * 188), "multiplex initData: the PAT and every PMT");
+        ok &= expect(unnamed.initData() == mux.left(2 * 188),
+                     "multiplex initData: the PAT and the PMT of the first program");
         QByteArray out;
         M2tsObject object;
         while (unnamed.readObject(4, &object, &error)) {
@@ -973,8 +976,8 @@ int main() {
         for (const QByteArray& payload : live.run.packets) {
             liveOut += payload;
         }
-        ok &= expect(live.run.error.isEmpty() && liveOut == mux && live.initData == mux.left(3 * 188),
-                     "live multiplex: byte-for-byte, initData with every PMT");
+        ok &= expect(live.run.error.isEmpty() && liveOut == mux && live.initData == mux.left(2 * 188),
+                     "live multiplex: byte-for-byte, initData with the PMT of the first program");
     }
 
     // Without a PAT, the unmodified mode cannot be chosen, so the track is
@@ -990,41 +993,60 @@ int main() {
         ok &= expect(run.packets.isEmpty() && run.error.contains("No PAT"), "unmodified without a PAT: refused");
     }
 
-    // A PMT change in a multiplex without a reference program updates initData.
-    // initData that was missing at open() stays missing: a later catalog cannot
-    // add initRef to the track (MSF Section 5.3).
+    // A multiplex without a reference program: initData is the PAT and the PMT
+    // of the first program in the PAT. A new PMT of that program updates it, a
+    // new PMT of another program does not, and when the first program leaves
+    // the PAT the next one takes over. initData that was missing at open()
+    // stays missing: a later catalog cannot add initRef (MSF Section 5.3).
     {
         const QByteArray pat = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
         const QByteArray pmt1 = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        const QByteArray pmt1v1 = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}, {0x0F, 0x101}}, 1), 1);
         const QByteArray pmt2 = tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}}), 0);
         const QByteArray pmt2v1 = tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}, {0x0F, 0x201}}, 1), 1);
         const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
-        const QString path = dir.filePath("mux-pmt-change.ts");
-        ok &= expect(writeFile(path, pat + pmt1 + pmt2 + video + pmt2v1 + video), "write multiplex PMT change");
-        M2tsPacketizer packetizer(path);
-        packetizer.setTransparent(true);
-        QString error;
-        ok &= expect(packetizer.open(0, &error), "multiplex PMT change opens");
-        M2tsObject object;
+        const auto changes = [&](const QString& name, const QByteArray& ts, QByteArray* initData) {
+            const QString path = dir.filePath(name);
+            writeFile(path, ts);
+            M2tsPacketizer packetizer(path);
+            packetizer.setTransparent(true);
+            QString error;
+            packetizer.open(0, &error);
+            M2tsObject object;
+            bool changed = false;
+            while (packetizer.readObject(1, &object, &error)) {
+                changed |= packetizer.takeInitDataChange(initData);
+            }
+            return changed;
+        };
         QByteArray initData;
-        bool changed = false;
-        while (packetizer.readObject(1, &object, &error)) {
-            changed |= packetizer.takeInitDataChange(&initData);
-        }
-        ok &= expect(changed && initData == pat + pmt1 + pmt2v1, "multiplex: a new PMT of program 2 updates initData");
+        ok &= expect(changes("mux-pmt1-change.ts", pat + pmt1 + pmt2 + video + pmt1v1 + video, &initData) &&
+                         initData == pat + pmt1v1,
+                     "multiplex: a new PMT of the first program updates initData");
+        ok &= expect(!changes("mux-pmt2-change.ts", pat + pmt1 + pmt2 + video + pmt2v1 + video, &initData),
+                     "multiplex: a new PMT of another program leaves initData unchanged");
 
-        QByteArray late = pat + pmt1;
+        const QByteArray pat3 = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}, {3, 0x1002}}, 0), 0);
+        const QByteArray pat23 = tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}, {3, 0x1002}}, 1), 1);
+        const QByteArray pmt3 = tb::psiPacket(0x1002, tb::pmtSection(3, 0x300, {{0x1B, 0x300}}));
+        ok &= expect(changes("mux-first-leaves.ts", pat3 + pmt1 + pmt2 + pmt3 + video + pat23 + pmt2 + video, &initData) &&
+                         initData == pat23 + pmt2,
+                     "multiplex: when the first program leaves, initData carries the PMT of the next first program");
+
+        QByteArray late = pat + pmt2;
         for (int index = 0; index < 20000; ++index) {
             late += tb::tsPacket(0x1FFF, false, QByteArray(184, char(0xFF)));
         }
-        late += pmt2 + video;
+        late += pmt1 + video;
         const QString latePath = dir.filePath("mux-late-pmt.ts");
         ok &= expect(writeFile(latePath, late), "write multiplex with a late PMT");
         M2tsPacketizer latePacketizer(latePath);
         latePacketizer.setTransparent(true);
+        QString error;
         ok &= expect(latePacketizer.open(0, &error) && latePacketizer.initData().isEmpty(),
-                     "multiplex: no initData while a PMT is missing at open");
-        changed = false;
+                     "multiplex: no initData while the PMT of the first program is missing at open");
+        M2tsObject object;
+        bool changed = false;
         while (latePacketizer.readObject(64, &object, &error)) {
             changed |= latePacketizer.takeInitDataChange(&initData);
         }

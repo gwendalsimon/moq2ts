@@ -273,7 +273,8 @@ With `--program N` it is named `mux-1-pN`, and its `mpeg2tsProgramNumber` and
 `mpeg2tsPcrPid` name N as the reference program, on whose PCR a subscriber
 paces the multiplex. Without `--program` the catalog names no program. The
 initialization data is the source PAT with the PMT of the reference program,
-or of every program without one. It never carries `mpeg2tsMuxRate` or
+which is the first program in the PAT without `--program` (draft "Use of MSF
+Initialization Data" and "Unmodified Multiplex"). It never carries `mpeg2tsMuxRate` or
 `mpeg2tsSiPids`. The track ends when the PAT lists one program, or when the
 reference program leaves it.
 

@@ -112,6 +112,18 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
     if (flags >= 0) {
         ::fcntl(pipeFd, F_SETFL, flags | O_NONBLOCK);
     }
+#ifdef F_SETPIPE_SZ
+    // The ring drains into the pipe only when srt_recv() returns, and libsrt
+    // releases packets in bursts, so each burst can move at most what the pipe
+    // holds. At the 64 KiB default that barely exceeds a 45 Mbit/s feed: after
+    // any delay the reader cannot catch up, the ring stays full, and it keeps
+    // overflowing. A larger pipe lets one burst carry a backlog. Best effort:
+    // the default stays when the system limit is lower.
+    constexpr int kPipeBytes = 1024 * 1024;
+    if (::fcntl(pipeFd, F_SETPIPE_SZ, kPipeBytes) < 0) {
+        qWarning() << "[SRT] Pipe kept at its default size:" << strerror(errno);
+    }
+#endif
 
     TsRingBuffer ring(kRingCapacityBytes);
     std::uint64_t reportedDrops = 0;

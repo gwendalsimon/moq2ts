@@ -170,22 +170,28 @@ A multi-program feed is published as one `unmodified-multiplex` track:
 | Track name | `mux-1` | `mux-1-pN` |
 | `mpeg2tsProgramNumber`, `mpeg2tsPcrPid` | absent | program N and its PCR PID |
 | `mpeg2tsRandomAccess` | absent | true when Groups start at random access points of N |
-| initialization data | the PAT and the PMT of every program | the PAT and the PMT of N |
+| initialization data | the PAT and the PMT of the first program in the PAT | the PAT and the PMT of N |
 | a program leaves the PAT | the track goes on | the track ends when N leaves |
 | the PAT lists one program | the track ends | the track ends |
 
 The track ends because the draft forbids `unmodified-multiplex` for a
 one-program PAT and requires a new track for a new program number. The
-initialization data is declared only when every PMT arrived at the start; it is
-never added later.
+initialization data carries the PMT of the reference program (draft "Use of MSF
+Initialization Data"). Without `--program` that is the first program in the
+PAT, on whose PCR a subscriber then paces the multiplex (draft "Unmodified
+Multiplex"); when that program leaves the PAT, the next first program takes
+over and a new catalog carries its PMT. The initialization data is declared
+only when that PMT arrived at the start; it is never added later.
 
 The SRT receive buffer holds about 5 s. While nothing reads it, for example
 while the publisher waits for its first subscriber, it keeps the newest media
 and drops the oldest. The stream then resumes at a random access point of the
 PID that starts Groups, and the gap falls on a Group boundary, never inside a
-Group (draft "PCR and Timing"). A gap before the first Object is not published
-at all: the track starts at the live edge, and the data read before the gap is
-dropped with a warning.
+Group. The packets are not modified to mark it: in the unmodified modes a
+discontinuity in the source reaches the subscriber unchanged (draft "PCR and
+Timing"). A gap before the first Object is not published at all: the track
+starts at the live edge, and the data read before the gap is dropped with a
+warning.
 
 ## Run: live feed from ffmpeg (server / near-encoder)
 
@@ -229,7 +235,8 @@ for a fidelity check, capture the emitted payloads and `cmp` against the source
 and `"mpeg2tsMode":"unmodified-multiplex"` otherwise. Neither contains
 `mpeg2tsSiPids`. Both carry the source PAT and PMT in a root `initDataList`:
 the one PMT of an `unmodified-program`, and for an `unmodified-multiplex` the
-PMT of its reference program (`--program`), or of every program without one.
+PMT of its reference program: the one `--program` names, or the first program
+in the PAT without it.
 An `unmodified-multiplex` catalog names its reference program in
 `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` only with `--program`, and never
 contains `mpeg2tsMuxRate`.

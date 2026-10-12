@@ -466,7 +466,7 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     // An unmodified track carries its source PAT and PMT as initData, so a
     // joining subscriber can pass them to the receiver before the first Object
     // (draft "Use of MSF Initialization Data"). A multiplex carries the PMT of
-    // its reference program, or of every program when it names none.
+    // its reference program: the first program of the PAT when it names none.
     if (m_transparent) {
         refreshInitData();
     }
@@ -483,9 +483,6 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     // The stored tables stay, so the same tables count as repeats.
     m_patAssembler.reset();
     m_pmtAssembler.reset();
-    for (auto& [pid, assembler] : m_allPmtAssemblers) {
-        assembler.reset();
-    }
     m_openProgramCount = m_patProgramCount;
     m_opened = true;
     // Non-seekable sources cannot rewind; the prebuffer (or the peeked bytes) is
@@ -548,12 +545,8 @@ bool M2tsPacketizer::scanPsi(QString* error) {
         return fail(QStringLiteral("Failed to seek M2TS source while reading the PAT and PMT."));
     }
 
-    // Every PMT of a multiplex can take longer than one PMT: up to 20,000
-    // packets, as for the random access look-ahead.
     constexpr int maxPacketsToScan = 4096;
-    constexpr int maxPacketsToScanAllPmts = 20000;
-    for (int index = 0; index < (collectsAllPmts() ? maxPacketsToScanAllPmts : maxPacketsToScan) && !psiComplete();
-         ++index) {
+    for (int index = 0; index < maxPacketsToScan && !psiComplete(); ++index) {
         const QByteArray sourcePacket = m_file.read(m_packetSize);
         if (sourcePacket.size() != m_packetSize) {
             break;
@@ -588,10 +581,6 @@ void M2tsPacketizer::handlePsiPacket(const QByteArray& tsPacket, const QByteArra
     if (pid == 0x0000) {
         for (const PsiAssembler::Section& section : m_patAssembler.push(tsPacket, sourcePacket)) {
             onPat(section);
-        }
-    } else if (collectsAllPmts() && m_allPmtPids.test(static_cast<std::size_t>(pid))) {
-        for (const PsiAssembler::Section& section : m_allPmtAssemblers[pid].push(tsPacket, sourcePacket)) {
-            onAnyPmt(pid, section);
         }
     } else if (pid == m_pmtPid) {
         for (const PsiAssembler::Section& section : m_pmtAssembler.push(tsPacket, sourcePacket)) {
@@ -649,20 +638,6 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
     m_patPrograms = programs;
     m_networkPid = networkPid;
     m_patProgramCount = static_cast<int>(programs.size());
-    // The PMTs kept for initData are those of the programs still listed on
-    // the same PID.
-    m_allPmtPids.reset();
-    for (const auto& [program, pid] : programs) {
-        m_allPmtPids.set(static_cast<std::size_t>(pid));
-    }
-    for (auto it = m_programPmts.begin(); it != m_programPmts.end();) {
-        const bool kept = std::find(programs.begin(), programs.end(), std::make_pair(it->first, it->second.first)) !=
-                          programs.end();
-        it = kept ? std::next(it) : m_programPmts.erase(it);
-    }
-    for (auto it = m_allPmtAssemblers.begin(); it != m_allPmtAssemblers.end();) {
-        it = m_allPmtPids.test(static_cast<std::size_t>(it->first)) ? std::next(it) : m_allPmtAssemblers.erase(it);
-    }
     if (!m_opened) {
         if (m_pmtPid < 0) {
             // A single-program source has only one program to describe, so the
@@ -915,30 +890,11 @@ void M2tsPacketizer::refreshInitData() {
     } else {
         initData = rewrittenPatPacket(m_pat.sourcePackets.first(), 0);
     }
-    if (collectsAllPmts()) {
-        // Two programs can share a PMT PID, and then a packet.
-        QList<QByteArray> pmtPackets;
-        for (const auto& [program, pmtPid] : m_patPrograms) {
-            const auto it = m_programPmts.find(program);
-            if (it == m_programPmts.end()) {
-                return;
-            }
-            for (const QByteArray& packet : it->second.second.sourcePackets) {
-                if (!pmtPackets.contains(packet)) {
-                    pmtPackets.append(packet);
-                }
-            }
-        }
-        for (const QByteArray& packet : pmtPackets) {
-            initData += packet;
-        }
-    } else {
-        if (m_pmt.bytes.isEmpty()) {
-            return;
-        }
-        for (const QByteArray& packet : m_pmt.sourcePackets) {
-            initData += packet;
-        }
+    if (m_pmt.bytes.isEmpty()) {
+        return;
+    }
+    for (const QByteArray& packet : m_pmt.sourcePackets) {
+        initData += packet;
     }
     if (m_opened && !m_initDataDeclared) {
         return;
@@ -949,41 +905,9 @@ void M2tsPacketizer::refreshInitData() {
     }
 }
 
-bool M2tsPacketizer::collectsAllPmts() const {
-    return m_transparent && m_requestedProgramNumber == 0 && m_patProgramCount > 1;
-}
-
-void M2tsPacketizer::onAnyPmt(int pmtPid, const PsiAssembler::Section& section) {
-    const QByteArray& bytes = section.bytes;
-    if (bytes.size() >= 12 && static_cast<unsigned char>(bytes[0]) == 0x02 &&
-        (static_cast<unsigned char>(bytes[5]) & 0x01) != 0) {
-        const int program = (static_cast<unsigned char>(bytes[3]) << 8) | static_cast<unsigned char>(bytes[4]);
-        const bool listed = std::find(m_patPrograms.begin(), m_patPrograms.end(), std::make_pair(program, pmtPid)) !=
-                            m_patPrograms.end();
-        const auto it = m_programPmts.find(program);
-        if (listed && (it == m_programPmts.end() || it->second.second.bytes != bytes)) {
-            m_programPmts[program] = {pmtPid, section};
-            if (m_opened) {
-                refreshInitData();
-            }
-        }
-    }
-    if (pmtPid == m_pmtPid) {
-        onPmt(section);
-    }
-}
-
 bool M2tsPacketizer::psiComplete() const {
     if (m_pat.bytes.isEmpty()) {
         return false;
-    }
-    if (!collectsAllPmts()) {
-        return !m_pmt.bytes.isEmpty();
-    }
-    for (const auto& [program, pmtPid] : m_patPrograms) {
-        if (m_programPmts.find(program) == m_programPmts.end()) {
-            return false;
-        }
     }
     return !m_pmt.bytes.isEmpty();
 }
@@ -1169,8 +1093,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // A view of the TS packet, without a copy; packet outlives every use.
         const QByteArray tsView = QByteArray::fromRawData(packet.constData() + (m_packetSize == 192 ? 4 : 0), 188);
         const int pid = pidOf(tsView);
-        if (pid == 0x0000 || pid == m_pmtPid ||
-            (collectsAllPmts() && m_allPmtPids.test(static_cast<std::size_t>(pid)))) {
+        if (pid == 0x0000 || pid == m_pmtPid) {
             handlePsiPacket(tsView, packet);
             if (m_ended) {
                 break;
@@ -1348,8 +1271,7 @@ void M2tsPacketizer::skipToFirstGap() {
         // The PSI read on the way stays current at the resume point.
         const QByteArray tsView = tsPacketView(packet);
         const int pid = pidOf(tsView);
-        if (pid == 0x0000 || pid == m_pmtPid ||
-            (collectsAllPmts() && m_allPmtPids.test(static_cast<std::size_t>(pid)))) {
+        if (pid == 0x0000 || pid == m_pmtPid) {
             handlePsiPacket(tsView, packet);
             if (m_ended) {
                 return;
@@ -1370,9 +1292,6 @@ void M2tsPacketizer::restartAfterGap() {
     // A section in progress cannot continue across the gap.
     m_patAssembler.reset();
     m_pmtAssembler.reset();
-    for (auto& [pid, assembler] : m_allPmtAssemblers) {
-        assembler.reset();
-    }
     m_patParts.clear();
     m_patPartsVersion = -1;
     m_patPartsLast = -1;

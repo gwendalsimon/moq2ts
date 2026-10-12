@@ -418,8 +418,9 @@ void LivePipeline::runLoop() {
                             .arg(packetizer.patProgramCount()));
         }
         if (catalogSpec.initData.isEmpty()) {
-            qWarning("The catalog carries no initRef: not every PMT of the multiplex arrived at the start, "
-                     "and a later catalog cannot add initRef to the track.");
+            qWarning("The catalog carries no initRef: the PMT of the reference program (the first program of "
+                     "the PAT when none is named) did not arrive at the start, and a later catalog cannot add "
+                     "initRef to the track.");
         }
     }
     const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);

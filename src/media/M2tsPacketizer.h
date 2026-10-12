@@ -185,10 +185,6 @@ private:
     void handlePsiPacket(const QByteArray& tsPacket, const QByteArray& sourcePacket);
     void onPat(const PsiAssembler::Section& section);
     void onPmt(const PsiAssembler::Section& section);
-    // An unmodified multiplex without a reference program: initData carries
-    // the PMT of every program, so every PMT PID is read.
-    bool collectsAllPmts() const;
-    void onAnyPmt(int pmtPid, const PsiAssembler::Section& section);
     bool psiComplete() const;
     // Per-program carriage: the PIDs to keep, and initData.
     bool selectProgramPids(QString* error);
@@ -246,11 +242,6 @@ private:
     int m_patPartsVersion = -1;
     int m_patPartsLast = -1;
     PsiAssembler::Section m_pmt;
-    // With collectsAllPmts(): the assembler of each PMT PID, and per program
-    // number its PMT PID and its last current PMT.
-    std::map<int, PsiAssembler> m_allPmtAssemblers;
-    std::bitset<8192> m_allPmtPids;
-    std::map<int, std::pair<int, PsiAssembler::Section>> m_programPmts;
     std::vector<std::pair<int, int>> m_patPrograms;
     int m_networkPid = -1;
     std::set<int> m_elementaryPids;
