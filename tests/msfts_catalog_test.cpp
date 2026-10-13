@@ -58,7 +58,9 @@ int main() {
         ok &= expect(track.value("mpeg2tsProgramNumber").toInt() == 1 && track.value("mpeg2tsPcrPid").toInt() == 256,
                      "multiplex: reference program named");
         ok &= expect(track.value("mpeg2tsRandomAccess").toBool(), "multiplex: random access of the reference program");
-        for (const char* field : {"mpeg2tsMuxRate", "mpeg2tsSiPids"}) {
+        ok &= expect(track.value("initRef").toString() == "init-program-1",
+                     "multiplex with reference: initRef (draft: SHOULD when random access is declared)");
+        for (const char* field : {"mpeg2tsMuxRate", "mpeg2tsSiPids", "mpeg2tsScte35Pid", "altGroup", "mpeg2tsEsPid"}) {
             ok &= expect(!track.contains(QLatin1String(field)), std::string("multiplex: no ") + field);
         }
         MsftsCatalog parsed;
@@ -76,9 +78,10 @@ int main() {
         catalog.randomAccess = true;
         const QJsonObject track = mediaTrack(MsftsMuxer::catalogJson(catalog));
         for (const char* field : {"mpeg2tsProgramNumber", "mpeg2tsPcrPid", "mpeg2tsMuxRate", "mpeg2tsSiPids",
-                                  "mpeg2tsRandomAccess"}) {
+                                  "mpeg2tsRandomAccess", "mpeg2tsScte35Pid", "altGroup", "mpeg2tsEsPid"}) {
             ok &= expect(!track.contains(QLatin1String(field)), std::string("multiplex without reference: no ") + field);
         }
+        ok &= expect(track.contains("initRef"), "multiplex without reference: initRef for the PAT and every PMT");
     }
 
     // per-program keeps every program field.

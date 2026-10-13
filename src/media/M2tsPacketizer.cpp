@@ -1,6 +1,9 @@
 #include "M2tsPacketizer.h"
 
+#include "SourceGapLog.h"
+
 #include <algorithm>
+#include <utility>
 #include <vector>
 
 #ifdef MOQ2TS_HAVE_LIBAV_CAPTURE
@@ -406,6 +409,10 @@ void M2tsPacketizer::setRetainNullPackets(bool retain) {
     m_retainNullPackets = retain;
 }
 
+void M2tsPacketizer::setSourceGaps(std::shared_ptr<SourceGapLog> gaps) {
+    m_sourceGaps = std::move(gaps);
+}
+
 bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     m_requestedProgramNumber = requestedProgramNumber;
     if (!m_file.open(QIODevice::ReadOnly)) {
@@ -428,12 +435,18 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
         if (!psiFound || !selectProgramPids(error)) {
             return false;
         }
-        // Draft "Mux Rate": a publisher that removes null packets SHOULD
-        // declare the rate; for a single-program source it is the nominal mux
-        // rate of the source, which the PCR gives.
-        if (!m_retainNullPackets && m_patProgramCount == 1) {
-            measureMuxRate();
+    } else if (m_pat.bytes.isEmpty()) {
+        // The unmodified mode follows the PAT: one program or several
+        // (draft "Unmodified Multiplex": MUST NOT for one program).
+        if (error) {
+            *error = QStringLiteral("No PAT found at the start of the source; the unmodified mode depends on "
+                                    "the number of programs that the PAT lists, so the track cannot be declared.");
         }
+        return false;
+    } else if (m_patProgramCount > 1 && m_requestedProgramNumber != 0 && !psiFound) {
+        // The catalog names the requested program as the reference program,
+        // which needs it in the PAT and its PMT.
+        return false;
     } else if (!psiFound) {
         // Non-fatal for unmodified carriage: without the PCR PID, the group
         // boundaries latch on the first PID with a random access indicator.
@@ -441,24 +454,31 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
             *error = QString();
         }
     }
+    // The MSF bitrate of the track, in every mode. Draft "Mux Rate": a
+    // publisher that removes null packets SHOULD declare the rate; for a
+    // single-program source it is the nominal mux rate of the source, which
+    // the PCR gives.
+    measureRates(!m_transparent && !m_retainNullPackets && m_patProgramCount == 1);
     // Group boundaries follow the random_access_indicator of the video PID, or
     // of the PCR PID when the PMT lists no video stream. The PCR can travel on
     // a PID of its own, which never carries the indicator.
     m_rapPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
-    // An unmodified-program track carries its source PAT and PMT as initData,
-    // so a joining subscriber can pass them to the receiver before the first
-    // Object (draft "Use of MSF Initialization Data").
-    if (m_transparent && psiFound && m_patProgramCount == 1) {
+    // An unmodified track carries its source PAT and PMT as initData, so a
+    // joining subscriber can pass them to the receiver before the first Object
+    // (draft "Use of MSF Initialization Data"). A multiplex carries the PMT of
+    // its reference program: the first program of the PAT when it names none.
+    if (m_transparent) {
         refreshInitData();
     }
     m_initDataChanged = false;
+    m_initDataDeclared = !m_initData.isEmpty();
     // A live track drops the packets before its first random access point, so
     // that every Group starts at one (draft "Group Boundaries"). A file keeps
     // byte 0. On a multiplex, the points are those of the reference program,
     // so a multiplex without one keeps its lead-in. The random_access_indicator
     // is optional, so the track declares random access only if one appears.
     const bool multiplex = m_transparent && m_patProgramCount != 1;
-    m_dropLeadIn = m_sequential && (!multiplex || m_pcrPid >= 0) && findRandomAccess();
+    m_dropLeadIn = m_sequential && (!multiplex || (namesProgram() && m_pcrPid >= 0)) && findRandomAccess();
     // readObject reads the PSI again from the start, so the assemblers restart.
     // The stored tables stay, so the same tables count as repeats.
     m_patAssembler.reset();
@@ -526,7 +546,7 @@ bool M2tsPacketizer::scanPsi(QString* error) {
     }
 
     constexpr int maxPacketsToScan = 4096;
-    for (int index = 0; index < maxPacketsToScan && m_pmt.bytes.isEmpty(); ++index) {
+    for (int index = 0; index < maxPacketsToScan && !psiComplete(); ++index) {
         const QByteArray sourcePacket = m_file.read(m_packetSize);
         if (sourcePacket.size() != m_packetSize) {
             break;
@@ -573,6 +593,11 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
     // A section with current_next_indicator 0 announces a table that does not
     // apply yet (ISO/IEC 13818-1 Section 2.4.4).
     if (section.bytes.size() < 12 || (static_cast<unsigned char>(section.bytes[5]) & 0x01) == 0) {
+        return;
+    }
+    // The first PAT sets the mode at open(). A later one is a change during the
+    // session, which readObject meets when it reads the source again.
+    if (!m_opened && !m_pat.bytes.isEmpty()) {
         return;
     }
     // A large PAT spans several sections. It applies once sections 0 to
@@ -635,19 +660,32 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
                                 "unmodified-program track ends.").arg(m_programNumber));
         return;
     }
+    if (m_transparent && m_openProgramCount > 1 && m_patProgramCount == 1) {
+        // Draft "Unmodified Multiplex": MUST NOT be used for a one-program PAT.
+        endTrack(QStringLiteral("The source PAT now lists one program, so the source is no longer a "
+                                "multiplex; the unmodified-multiplex track ends."));
+        return;
+    }
+    if (m_transparent && m_openProgramCount > 1 && m_requestedProgramNumber != 0 && !listed) {
+        // The catalog names it as the reference program. Another one needs a
+        // new track (draft "Catalog": MUST), which moq2ts cannot add during a
+        // session.
+        endTrack(QStringLiteral("Reference program %1 left the source PAT; the unmodified-multiplex "
+                                "track that names it ends.").arg(m_programNumber));
+        return;
+    }
     if (!m_transparent && !listed) {
         // Draft "Per-Program": the publisher SHOULD end the track.
         endTrack(QStringLiteral("Program %1 left the source PAT; the track ends.").arg(m_programNumber));
         return;
     }
     if (!listed && !programs.empty()) {
-        // Unmodified-multiplex: the reference program left the PAT. The track
-        // goes on, and the catalog's reference fields are now stale advisory
-        // values. Group boundaries move to the first program still listed,
-        // once its PMT arrives; no PID latches before that.
-        qWarning("Reference program %d left the PAT; Groups now follow program %d, and the catalog's "
-                 "reference program is stale until the track restarts.",
-                 m_programNumber, programs.front().first);
+        // Unmodified-multiplex without a reference program: the program whose
+        // random access points cut Groups left the PAT. The catalog names no
+        // program, so the track goes on. Group boundaries move to the first
+        // program still listed, once its PMT arrives; no PID latches before that.
+        qWarning("Program %d left the PAT; Groups now follow program %d.", m_programNumber,
+                 programs.front().first);
         m_programNumber = programs.front().first;
         m_pmtPid = programs.front().second;
         m_pmtAssembler.reset();
@@ -837,11 +875,11 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
 
 void M2tsPacketizer::refreshInitData() {
     // initData is the PAT and the PMT that the track carries: the rewritten PAT
-    // in per-program carriage, the source PAT in unmodified-program carriage.
-    // A multiplex has none. While a moved PMT has not arrived yet, the tables
-    // do not match, so initData waits for it.
-    const int programs = m_opened ? m_openProgramCount : m_patProgramCount;
-    if ((m_transparent && programs != 1) || m_pat.bytes.isEmpty() || m_pmt.bytes.isEmpty()) {
+    // in per-program carriage, the source PAT in the unmodified modes. A
+    // multiplex carries the PMT of its reference program, or of every program
+    // when it names none. While a PMT has not arrived yet, the tables do not
+    // match, so initData waits for it.
+    if (m_pat.bytes.isEmpty()) {
         return;
     }
     QByteArray initData;
@@ -852,13 +890,26 @@ void M2tsPacketizer::refreshInitData() {
     } else {
         initData = rewrittenPatPacket(m_pat.sourcePackets.first(), 0);
     }
+    if (m_pmt.bytes.isEmpty()) {
+        return;
+    }
     for (const QByteArray& packet : m_pmt.sourcePackets) {
         initData += packet;
+    }
+    if (m_opened && !m_initDataDeclared) {
+        return;
     }
     if (initData != m_initData) {
         m_initData = initData;
         m_initDataChanged = true;
     }
+}
+
+bool M2tsPacketizer::psiComplete() const {
+    if (m_pat.bytes.isEmpty()) {
+        return false;
+    }
+    return !m_pmt.bytes.isEmpty();
 }
 
 bool M2tsPacketizer::takeInitDataChange(QByteArray* initData) {
@@ -991,19 +1042,38 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     const int packets = std::max(1, packetsPerObject);
     QByteArray payload;
     payload.reserve(packets * m_packetSize);
+    // Only a gap leaves a packet carried over.
+    if (!m_carryPacket.isEmpty()) {
+        m_groupStartsAtGap = true;
+    }
+    if (m_nextObjectId == 0) {
+        skipToFirstGap();
+        if (m_ended) {
+            if (error) {
+                *error = m_endReason;
+            }
+            return false;
+        }
+    }
 
     for (int index = 0; index < packets; ++index) {
-        // Drain any packets buffered during the init scan (non-seekable sources)
-        // before reading further from the device, preserving stream order.
-        QByteArray packet;
-        if (m_prebufferPos < m_prebuffer.size()) {
-            packet = m_prebuffer.mid(m_prebufferPos, m_packetSize);
-            m_prebufferPos += m_packetSize;
-        } else {
-            packet = m_file.read(m_packetSize);
-        }
+        std::uint64_t packetOffset = 0;
+        QByteArray packet = nextSourcePacket(&packetOffset);
         if (packet.isEmpty()) {
             break;
+        }
+        // Draft "PCR and Timing": no PCR discontinuity within a Group. The
+        // source skipped ahead before this packet, so the Object ends here and
+        // a new Group starts with this packet.
+        if (m_sourceGaps && packetOffset > 0 && m_sourceGaps->takeUpTo(packetOffset)) {
+            restartAfterGap();
+            if (!payload.isEmpty()) {
+                // The next Object starts with it, and a Group with that Object.
+                m_carryPacket = std::move(packet);
+                m_carryOffset = packetOffset;
+                break;
+            }
+            m_groupStartsAtGap = true;
         }
         if (packet.size() != m_packetSize) {
             if (error) {
@@ -1081,6 +1151,9 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     // One pass over the Object: a random access point starts a new Group, and
     // the first video PES gives the media time (MSF -01 Section 7.1.1).
     bool rapDetected = false;
+    // PTS of the random access point itself, which the first video PES of the
+    // Object can precede: the Group length runs from one to the next.
+    std::optional<std::uint64_t> rapPtsUs;
     object->ptsUs.reset();
     const int ps = m_packetSize;
     const int tsOffset = ps == 192 ? 4 : 0;
@@ -1106,24 +1179,40 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             m_rapPid = pid; // fallback: latch on first RAI PID seen
         }
         rapDetected = pid == m_rapPid;
+        if (rapDetected) {
+            const std::int64_t pts = pesPts(tsView);
+            if (pts >= 0) {
+                rapPtsUs = m_ptsUnwrapper.unwrap(pts) * 100 / 9;
+            }
+        }
     }
 
-    if (rapDetected && m_sawFirstRap) {
+    // A gap starts a Group even where the source resumed off a random access
+    // point of the group PID.
+    const bool gapStart = std::exchange(m_groupStartsAtGap, false);
+    if ((rapDetected && m_sawFirstRap) || (gapStart && m_nextObjectId > 0)) {
         // New group at this RAP boundary
         ++m_currentGroupId;
         m_nextObjectIdInGroup = 0;
     }
+    if (gapStart && m_nextObjectId > 0) {
+        qWarning("The source skipped ahead (the SRT receive buffer kept only the newest media while nothing "
+                 "read it): Group %llu starts where it resumed%s.",
+                 static_cast<unsigned long long>(m_currentGroupId),
+                 rapDetected ? "" : ", which is not a random access point of the group PID");
+    }
     // Draft "Group Boundaries": a Group SHOULD NOT last longer than 2 seconds.
     // Groups follow the random access points of the source, so say once when
     // two of them are further apart.
-    if (rapDetected && object->ptsUs.has_value()) {
-        if (m_lastGroupPtsUs.has_value() && !m_warnedLongGroup && *object->ptsUs > *m_lastGroupPtsUs + 2000000) {
+    const std::optional<std::uint64_t> groupPtsUs = rapPtsUs.has_value() ? rapPtsUs : object->ptsUs;
+    if (rapDetected && groupPtsUs.has_value()) {
+        if (m_lastGroupPtsUs.has_value() && !m_warnedLongGroup && *groupPtsUs > *m_lastGroupPtsUs + 2000000) {
             m_warnedLongGroup = true;
-            qWarning("Random access points %.1f s apart: a Group lasts longer than the 2 s that MSFTS "
+            qWarning("Random access points %.2f s apart: a Group lasts longer than the 2 s that MSFTS "
                      "recommends. Shorten the GOP at the encoder.",
-                     static_cast<double>(*object->ptsUs - *m_lastGroupPtsUs) / 1e6);
+                     static_cast<double>(*groupPtsUs - *m_lastGroupPtsUs) / 1e6);
         }
-        m_lastGroupPtsUs = object->ptsUs;
+        m_lastGroupPtsUs = groupPtsUs;
     }
     if (rapDetected) {
         m_sawFirstRap = true;
@@ -1132,9 +1221,82 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     object->payload = std::move(payload);
     object->groupId = m_currentGroupId;
     object->objectId = m_nextObjectIdInGroup++;
-    object->startsGroup = rapDetected;
+    object->startsGroup = rapDetected || gapStart;
     ++m_nextObjectId;
     return true;
+}
+
+QByteArray M2tsPacketizer::nextSourcePacket(std::uint64_t* offset) {
+    if (!m_carryPacket.isEmpty()) {
+        *offset = m_carryOffset;
+        return std::exchange(m_carryPacket, QByteArray());
+    }
+    // Drain any packets buffered during the init scan (non-seekable sources)
+    // before reading further from the device, preserving stream order.
+    QByteArray packet;
+    if (m_prebufferPos < m_prebuffer.size()) {
+        packet = m_prebuffer.mid(m_prebufferPos, m_packetSize);
+        m_prebufferPos += m_packetSize;
+    } else {
+        packet = m_file.read(m_packetSize);
+    }
+    *offset = m_sourceOffset;
+    m_sourceOffset += static_cast<std::uint64_t>(packet.size());
+    return packet;
+}
+
+void M2tsPacketizer::skipToFirstGap() {
+    // The SRT receive thread keeps the newest media while nothing reads, for
+    // example while the publisher waits for its first subscriber. What open()
+    // read before that wait is then seconds older than what follows the gap.
+    // Publishing it would open the track with stale media and a discontinuity,
+    // which the unmodified modes cannot mark, so the track starts after it.
+    if (!m_sourceGaps || !m_carryPacket.isEmpty()) {
+        return;
+    }
+    const std::optional<std::uint64_t> gap = m_sourceGaps->next();
+    if (!gap.has_value() || *gap <= m_sourceOffset) {
+        return;
+    }
+    std::uint64_t skipped = 0;
+    while (m_sourceOffset < *gap) {
+        std::uint64_t offset = 0;
+        QByteArray packet = nextSourcePacket(&offset);
+        if (packet.size() != m_packetSize || !packetHasSync(packet)) {
+            // readObject reports it.
+            m_carryPacket = std::move(packet);
+            m_carryOffset = offset;
+            return;
+        }
+        // The PSI read on the way stays current at the resume point.
+        const QByteArray tsView = tsPacketView(packet);
+        const int pid = pidOf(tsView);
+        if (pid == 0x0000 || pid == m_pmtPid) {
+            handlePsiPacket(tsView, packet);
+            if (m_ended) {
+                return;
+            }
+        }
+        skipped += static_cast<std::uint64_t>(packet.size());
+    }
+    m_sourceGaps->takeUpTo(m_sourceOffset);
+    restartAfterGap();
+    const double seconds = m_measuredBitrate > 0 ? static_cast<double>(skipped) * 8 / m_measuredBitrate : 0;
+    qWarning("The source skipped ahead before the first Object (the SRT receive buffer kept only the newest "
+             "media while nothing read it): %llu bytes read before the gap (about %.1f s) are not published, "
+             "and the track starts where the source resumed.",
+             static_cast<unsigned long long>(skipped), seconds);
+}
+
+void M2tsPacketizer::restartAfterGap() {
+    // A section in progress cannot continue across the gap.
+    m_patAssembler.reset();
+    m_pmtAssembler.reset();
+    m_patParts.clear();
+    m_patPartsVersion = -1;
+    m_patPartsLast = -1;
+    // The time skipped is no Group length.
+    m_lastGroupPtsUs.reset();
 }
 
 QByteArray M2tsPacketizer::lookAheadPacket(qsizetype offset) {
@@ -1176,28 +1338,36 @@ bool M2tsPacketizer::findRandomAccess() {
     return false;
 }
 
-void M2tsPacketizer::measureMuxRate() {
-    // Counts the 188-octet packets between the first PCR and the last PCR read,
-    // over at most 20,000 packets or 1 second of PCR time, and divides by the
-    // PCR interval. A non-seekable source keeps the packets read in the
-    // prebuffer, so readObject still sees them.
+void M2tsPacketizer::measureRates(bool muxRate) {
+    // Counts the packets between the first PCR and the last PCR read, over at
+    // most 20,000 packets or 1 second of PCR time, and divides by the PCR
+    // interval: every 188-octet packet for the mux rate, and the packets this
+    // track carries, at their source size, for the bitrate. A non-seekable
+    // source keeps the packets read in the prebuffer, so readObject still sees
+    // them.
     constexpr int maxPackets = 20000;
     constexpr std::int64_t pcrHz = 27000000;
     constexpr std::int64_t pcrRange = (std::int64_t{1} << 33) * 300;
     m_muxRateNote.clear();
-    if (m_pcrPid < 0) {
+    if (muxRate && m_pcrPid < 0) {
         m_muxRateNote = QStringLiteral("the PMT gives no PCR PID");
-        return;
     }
     if (!m_sequential && !m_file.seek(0)) {
         return;
     }
+    // Without a known PCR PID, as in a multiplex without a reference program,
+    // the bitrate takes the first PID that carries a PCR.
+    int pcrPid = m_pcrPid;
     std::int64_t firstPcr = -1;
     std::int64_t lastPcr = -1;
     std::int64_t elapsed = 0;
     int firstIndex = 0;
     int lastIndex = 0;
     int nullPackets = 0;
+    // carried[i]: packets this track carries among the first i read.
+    std::vector<int> carried;
+    carried.reserve(4096);
+    carried.push_back(0);
     for (int index = 0; index < maxPackets && elapsed < pcrHz; ++index) {
         const QByteArray packet = lookAheadPacket(qsizetype{index} * m_packetSize);
         if (packet.size() != m_packetSize || !packetHasSync(packet)) {
@@ -1206,7 +1376,16 @@ void M2tsPacketizer::measureMuxRate() {
         const QByteArray tsPacket = tsPacketView(packet);
         const int pid = pidOf(tsPacket);
         nullPackets += pid == 0x1FFF ? 1 : 0;
-        const std::int64_t pcr = pid == m_pcrPid ? pcrOf(tsPacket) : -1;
+        const bool kept = m_transparent || m_selectedPids.test(static_cast<std::size_t>(pid)) ||
+                          (m_retainNullPackets && pid == 0x1FFF);
+        carried.push_back(carried.back() + (kept ? 1 : 0));
+        std::int64_t pcr = -1;
+        if (pcrPid < 0 || pid == pcrPid) {
+            pcr = pcrOf(tsPacket);
+            if (pcr >= 0) {
+                pcrPid = pid;
+            }
+        }
         if (pcr < 0) {
             continue;
         }
@@ -1222,7 +1401,18 @@ void M2tsPacketizer::measureMuxRate() {
     if (!m_sequential) {
         m_file.seek(0);
     }
-    if (elapsed <= 0 || lastIndex <= firstIndex) {
+    const bool timed = elapsed > 0 && lastIndex > firstIndex;
+    if (timed) {
+        const std::int64_t bytes = static_cast<std::int64_t>(carried[lastIndex] - carried[firstIndex]) * m_packetSize;
+        m_measuredBitrate = (bytes * 8 * pcrHz + elapsed / 2) / elapsed;
+        // Null stuffing keeps the source at a constant rate, and an unmodified
+        // track carries all of it.
+        m_measuredBitrateIsConstant = m_transparent && nullPackets > 0;
+    }
+    if (!muxRate || m_pcrPid < 0) {
+        return;
+    }
+    if (!timed) {
         m_muxRateNote = QStringLiteral("fewer than two PCRs at the start of the source");
     } else if (nullPackets == 0) {
         // Without null stuffing the source is likely VBR, and the measure would
@@ -1231,6 +1421,14 @@ void M2tsPacketizer::measureMuxRate() {
     } else {
         m_measuredMuxRate = (static_cast<std::int64_t>(lastIndex - firstIndex) * 188 * 8 * pcrHz + elapsed / 2) / elapsed;
     }
+}
+
+qint64 M2tsPacketizer::measuredBitrate() const {
+    return m_measuredBitrate;
+}
+
+bool M2tsPacketizer::measuredBitrateIsConstant() const {
+    return m_measuredBitrateIsConstant;
 }
 
 qint64 M2tsPacketizer::measuredMuxRate() const {
@@ -1253,6 +1451,14 @@ bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
 
 bool M2tsPacketizer::randomAccess() const {
     return m_dropLeadIn;
+}
+
+bool M2tsPacketizer::namesProgram() const {
+    return !(m_transparent && m_patProgramCount > 1) || m_requestedProgramNumber != 0;
+}
+
+int M2tsPacketizer::groupPid() const {
+    return m_rapPid >= 0 ? m_rapPid : -1;
 }
 
 bool M2tsPacketizer::hasRandomAccessIndicator(const QByteArray& tsPacket) const {

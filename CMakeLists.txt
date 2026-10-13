@@ -154,7 +154,27 @@ if(MOQXR_PUBLISH_FOUND AND NOT MOQ2TS_BUILD_WITH_MOCK_MOQXR)
         find_package(OpenSSL REQUIRED)
     elseif(EXISTS "${MOQXR_SOURCE_DIR}/CMakeLists.txt" AND NOT TARGET openmoq_publisher_lib)
         set(OPENMOQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        # moq2ts receives SRT itself (SrtSource) and never uses moqxr's SRT
+        # ingest. Left on, moqxr links the default OpenSSL libsrt while FFmpeg's
+        # libavformat loads libsrt-gnutls. The two copies export the same
+        # symbols, and libsrt-gnutls's exit-time destructors then run against the
+        # other copy's state: a SIGSEGV on every exit, after srt_cleanup().
+        set(OPENMOQ_ENABLE_SRT OFF CACHE BOOL "" FORCE)
+        # moqxr hides the pkg-config search path while it configures picotls,
+        # then restores PKG_CONFIG_LIBDIR as an empty string when it was unset.
+        # pkg-config then searches no directory at all, so every
+        # pkg_check_modules below fails: libsrt among them, which loses the
+        # libsrt-gnutls choice further down. Put the variable back as it was.
+        if(DEFINED ENV{PKG_CONFIG_LIBDIR})
+            set(_moq2ts_pkg_config_libdir "$ENV{PKG_CONFIG_LIBDIR}")
+        endif()
         add_subdirectory("${MOQXR_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/moqxr" EXCLUDE_FROM_ALL)
+        if(DEFINED _moq2ts_pkg_config_libdir)
+            set(ENV{PKG_CONFIG_LIBDIR} "${_moq2ts_pkg_config_libdir}")
+            unset(_moq2ts_pkg_config_libdir)
+        else()
+            unset(ENV{PKG_CONFIG_LIBDIR})
+        endif()
     endif()
 endif()
 

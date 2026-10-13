@@ -15,6 +15,12 @@ pkg-config. `libsrt` is needed for SRT ingest and FFmpeg's libav* for capture an
 duration probing; both are found through pkg-config and the build degrades
 gracefully if they are absent. The real-relay build additionally needs OpenSSL.
 
+FFmpeg's libavformat loads the GnuTLS build of libsrt (`libsrt-gnutls`), so the
+build links that same library when it is installed, and configures moqxr without
+its own SRT ingest, which moq2ts does not use. Exactly one libsrt is then loaded:
+two copies export the same symbols and crash the process at exit. `ldd
+build/moq2ts-cli | grep srt` should list only `libsrt-gnutls`.
+
 On Debian/Ubuntu:
 
 ```bash
@@ -57,15 +63,15 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--audio <path>` | - | Alternate single-stream TS source path |
 | `--srt-config <path>` | - | SRT ingest: JSON caller config (see below). Takes the place of `--video`, and implies `--unmodified` |
 | `--camera <id>` / `--mic <id>` | - | Capture device ids (instead of a TS source) |
-| `--program <n>` | `0` | MPEG program to select (0 = first). With `--unmodified` on a multi-program source, it names the reference program |
-| `--unmodified` | off | Unmodified carriage: forward every source packet unchanged (no PID filter or rewrite, no initialization data). The track is `unmodified-program` for a single-program source and `unmodified-multiplex` otherwise |
-| `--transparent` | off | Alias of `--unmodified`, kept for existing scripts |
+| `--program <n>` | `0` | Per-program: the MPEG program to carry (0 = first). Unmodified multiplex: the reference program that the catalog names (0 = none) |
+| `--unmodified` | off | Unmodified carriage: forward every source packet unchanged (no PID filter or rewrite). The catalog carries the source PAT and PMT as initialization data. The track is `unmodified-program` for a single-program source and `unmodified-multiplex` otherwise; without a PAT the track is refused |
+| `--transparent`, `--publish-multiplex` | off | Aliases of `--unmodified`; `--transparent` is kept for existing scripts |
 | `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT). The SDT and the EIT keep the carried service only; the NIT, BAT, TDT, and TOT pass unchanged |
 | `--retain-null` | off | Per-program mode: also keep null (0x1FFF) packets |
 | `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s. With 0, a per-program track of a single-program source without `--retain-null` measures the rate from the PCR when the source carries null packets, and a warning says when no rate is declared. The draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--unmodified` and SRT ingest drop it when the source PAT lists several programs, and warn |
 | `--fragment-ms <ms>` | `250` | Group cadence |
 | `--segment-bytes <n>` | `65536` | Target object size |
-| `--draft <n>` | `16` | MOQ draft version (14 or 16) |
+| `--draft <n>` | `16` | MOQ draft version: 14, 16, 17 or 18. The relay must list it in `moqt_versions`; any other value is refused |
 | `--paced` | off | File sources only: pace publishing at media rate instead of as fast as possible |
 | `--width/--height/--fps/--video-bitrate` | 1920/1080/30/2500 | Capture params |
 | `--sample-rate/--channels/--audio-bitrate/--audio-codec` | 48000/2/160/aac | Audio params |
@@ -121,16 +127,71 @@ ffmpeg -re -i input.ts -c copy -f mpegts \
 ```
 
 `pkt_size=1316` is worth keeping: 1316 = 7 x 188, so each SRT payload holds a
-whole number of TS packets and no packet straddles a datagram boundary.
+whole number of TS packets and no packet straddles a datagram boundary. The
+publisher reads the SRT payloads as one byte stream and passes on whole packets
+only, so a sender whose payloads do not end on a packet boundary still works.
 `latency_ms` sets SRT's retransmit buffer, which absorbs network jitter on the
 ingest side before the publisher ever sees the bytes.
 
-**SRT ingest always uses unmodified carriage.** A contribution feed is forwarded
-as received, so the per-program options (`--retain-si`, `--retain-null`) do
-not apply and are ignored; passing them prints a warning. `--program` names
-the reference program of a multi-program feed. The catalog drops
-`--mux-rate` when the source PAT lists several programs.
-Use a file or FIFO source if you need per-program publishing.
+**SRT ingest always uses unmodified carriage** (`--publish-multiplex` says so
+explicitly). A contribution feed is forwarded as received, so the per-program
+options (`--retain-si`, `--retain-null`) do not apply and are ignored; passing
+them prints a warning. The catalog drops `mpeg2tsMuxRate` when the source PAT
+lists several programs, but `--mux-rate` still bounds the catalog `bitrate`
+(see [DEVELOPER.md](DEVELOPER.md)). Use a file or FIFO source if you need
+per-program publishing.
+
+A two-program test feed, as used to test this path. ffmpeg encodes both programs
+in real time and listens for the publisher on SRT; `-muxrate` pads the multiplex
+to a constant rate with null packets, as a contribution encoder does:
+
+```bash
+ffmpeg -hide_banner -re \
+  -f lavfi -i "testsrc2=s=640x360:r=25" -f lavfi -i "sine=f=440:r=48000" \
+  -f lavfi -i "testsrc=s=640x360:r=25"  -f lavfi -i "sine=f=880:r=48000" \
+  -map 0:v -map 1:a -map 2:v -map 3:a \
+  -c:v libx264 -preset ultrafast -g 50 -keyint_min 50 -sc_threshold 0 \
+  -b:v:0 2000k -maxrate:v:0 2000k -bufsize:v:0 2000k \
+  -b:v:1 1000k -maxrate:v:1 1000k -bufsize:v:1 1000k \
+  -c:a aac -b:a 96k \
+  -program program_num=1:title=ProgOne:st=0:st=1 \
+  -program program_num=2:title=ProgTwo:st=2:st=3 \
+  -muxrate 6000000 -f mpegts "srt://0.0.0.0:9000?mode=listener&pkt_size=1316"
+```
+
+`-g 50` at 25 fps gives a random access point every 2 s, the longest Group that
+MSFTS recommends. To keep a byte-for-byte copy of what was sent, see the
+end-to-end test in [tests/srt-mpts-e2e.sh](../tests/srt-mpts-e2e.sh).
+
+A multi-program feed is published as one `unmodified-multiplex` track:
+
+| | Without `--program` | With `--program N` |
+|---|---|---|
+| Track name | `mux-1` | `mux-1-pN` |
+| `mpeg2tsProgramNumber`, `mpeg2tsPcrPid` | absent | program N and its PCR PID |
+| `mpeg2tsRandomAccess` | absent | true when Groups start at random access points of N |
+| initialization data | the PAT and the PMT of the first program in the PAT | the PAT and the PMT of N |
+| a program leaves the PAT | the track goes on | the track ends when N leaves |
+| the PAT lists one program | the track ends | the track ends |
+
+The track ends because the draft forbids `unmodified-multiplex` for a
+one-program PAT and requires a new track for a new program number. The
+initialization data carries the PMT of the reference program (draft "Use of MSF
+Initialization Data"). Without `--program` that is the first program in the
+PAT, on whose PCR a subscriber then paces the multiplex (draft "Unmodified
+Multiplex"); when that program leaves the PAT, the next first program takes
+over and a new catalog carries its PMT. The initialization data is declared
+only when that PMT arrived at the start; it is never added later.
+
+The SRT receive buffer holds about 5 s. While nothing reads it, for example
+while the publisher waits for its first subscriber, it keeps the newest media
+and drops the oldest. The stream then resumes at a random access point of the
+PID that starts Groups, and the gap falls on a Group boundary, never inside a
+Group. The packets are not modified to mark it: in the unmodified modes a
+discontinuity in the source reaches the subscriber unchanged (draft "PCR and
+Timing"). A gap before the first Object is not published at all: the track
+starts at the live edge, and the data read before the gap is dropped with a
+warning.
 
 ## Run: live feed from ffmpeg (server / near-encoder)
 
@@ -172,11 +233,13 @@ for a fidelity check, capture the emitted payloads and `cmp` against the source
 `.ts`. The catalog JSON should contain
 `"mpeg2tsMode":"unmodified-program"` when the source PAT lists one program,
 and `"mpeg2tsMode":"unmodified-multiplex"` otherwise. Neither contains
-`mpeg2tsSiPids`. An `unmodified-program` catalog carries the source PAT and
-PMT in a root `initDataList`. An `unmodified-multiplex` catalog names its
-reference program (the first of the PAT, or `--program`) in
-`mpeg2tsProgramNumber` and `mpeg2tsPcrPid` when its PMT is known, and never
-contains `mpeg2tsMuxRate` or a root `initDataList`.
+`mpeg2tsSiPids`. Both carry the source PAT and PMT in a root `initDataList`:
+the one PMT of an `unmodified-program`, and for an `unmodified-multiplex` the
+PMT of its reference program: the one `--program` names, or the first program
+in the PAT without it.
+An `unmodified-multiplex` catalog names its reference program in
+`mpeg2tsProgramNumber` and `mpeg2tsPcrPid` only with `--program`, and never
+contains `mpeg2tsMuxRate`.
 
 In per-program mode the PAT/PMT bootstrap (with the rewritten PAT) is carried the way MSF-01 defines it: the
 track gets an `initRef` string, and the bytes live in a root `initDataList` entry

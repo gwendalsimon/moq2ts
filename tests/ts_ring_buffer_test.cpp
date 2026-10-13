@@ -1,6 +1,7 @@
 // Pure logic tests for the live-ingest ring buffer (no Qt/libav/SRT deps).
 #include "media/TsRingBuffer.h"
 
+#include <chrono>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -157,6 +158,110 @@ int main() {
         ok &= expect(ring.resyncToRandomAccess(), "valve opens after a buffer's worth with no IDR");
         ok &= expect(!ring.resyncPending(), "resync flag cleared by the valve");
         ok &= expect(ring.at(0) == 0x47, "fallback landed on a packet boundary");
+    }
+
+    // --- 4c. A preferred PID: resume at its newest IDR, not at a newer IDR of
+    //      another program; fall back to any IDR after a buffer's worth. -------
+    {
+        TsRingBuffer ring(10 * kPkt);
+        for (int i = 0; i < 12; ++i) {
+            appendPacket(ring, 0x100, false, static_cast<unsigned char>(i));
+        }
+        appendPacket(ring, 0x100, true, 100);   // reference program's IDR
+        appendPacket(ring, 0x100, false, 101);
+        appendPacket(ring, 0x200, true, 200);   // a newer IDR of another program
+        appendPacket(ring, 0x200, false, 201);
+        ok &= expect(ring.resyncToRandomAccess(0x100), "resync on the preferred PID");
+        ok &= expect(ring.at(10) == 100, "resumed at the preferred PID's IDR, not the newer one");
+
+        TsRingBuffer other(4 * kPkt);
+        for (int i = 0; i < 5; ++i) {
+            appendPacket(other, 0x200, false, static_cast<unsigned char>(i));
+        }
+        appendPacket(other, 0x200, true, 50);
+        ok &= expect(!other.resyncToRandomAccess(0x100), "another PID's IDR does not end the wait at once");
+        appendPacket(other, 0x200, false, 60);
+        ok &= expect(!other.resyncToRandomAccess(0x100), "still waiting for the preferred PID");
+        appendPacket(other, 0x200, false, 61);   // a buffer's worth has now been dropped
+        ok &= expect(other.resyncToRandomAccess(0x100) && other.at(10) == 50,
+                     "after a buffer's worth without the preferred PID, any IDR resumes");
+    }
+
+    // --- 4d. The resync scan is incremental: a random access point that arrives
+    //      over several calls is found, the newest one wins across calls, one
+    //      recorded and then dropped no longer counts, framing is recovered
+    //      after junk bytes, and a change of preferred PID looks again. ---------
+    {
+        TsRingBuffer ring(6 * kPkt);
+        for (int i = 0; i < 7; ++i) {
+            appendPacket(ring, 0x100, false, static_cast<unsigned char>(i));
+        }
+        ok &= expect(!ring.resyncToRandomAccess(0x100), "incremental: waiting, nothing to resume at");
+        appendPacket(ring, 0x100, true, 70);
+        ok &= expect(!ring.resyncToRandomAccess(0x200), "incremental: an IDR of another PID does not count");
+        ok &= expect(ring.resyncPending(), "incremental: still pending");
+        appendPacket(ring, 0x100, false, 71);
+        appendPacket(ring, 0x100, true, 72);
+        ok &= expect(ring.resyncToRandomAccess(0x100) && ring.at(10) == 72,
+                     "incremental: the PID change looks again, and the newest IDR across calls wins");
+        ok &= expect(ring.size() == kPkt, "incremental: the backlog before the newest IDR is gone");
+
+        TsRingBuffer dropped(3 * kPkt);
+        for (int i = 0; i < 4; ++i) {
+            appendPacket(dropped, 0x100, false, static_cast<unsigned char>(i));
+        }
+        appendPacket(dropped, 0x100, true, 40);
+        appendPacket(dropped, 0x200, false, 41);
+        appendPacket(dropped, 0x200, false, 42);
+        ok &= expect(dropped.resyncToRandomAccess(0x100) && dropped.at(10) == 40,
+                     "incremental: resumes at the IDR while it is still buffered");
+        for (int i = 0; i < 4; ++i) {
+            appendPacket(dropped, 0x100, false, static_cast<unsigned char>(50 + i));
+        }
+        appendPacket(dropped, 0x100, true, 60);   // recorded by the next call...
+        ok &= expect(dropped.resyncToRandomAccess(0x100) && dropped.at(10) == 60,
+                     "incremental: a second gap resumes at its own IDR");
+        for (int i = 0; i < 2; ++i) {
+            appendPacket(dropped, 0x100, false, static_cast<unsigned char>(70 + i));
+        }
+        appendPacket(dropped, 0x100, false, 72);
+        appendPacket(dropped, 0x100, false, 73);   // drops the front, raising a resync
+        ok &= expect(dropped.resyncPending() && !dropped.resyncToRandomAccess(0x100),
+                     "incremental: no IDR left in the buffer, so it waits");
+
+        TsRingBuffer junk(8 * kPkt);
+        const char garbage[5] = {0x11, 0x22, 0x47, 0x33, 0x44};   // a stray 0x47 among them
+        junk.append(garbage, sizeof(garbage));
+        for (int i = 0; i < 8; ++i) {
+            appendPacket(junk, 0x100, false, static_cast<unsigned char>(i));
+        }
+        appendPacket(junk, 0x100, true, 90);
+        appendPacket(junk, 0x100, false, 91);
+        ok &= expect(junk.resyncToRandomAccess(0x100) && junk.at(0) == 0x47 && junk.at(10) == 90,
+                     "incremental: framing recovered after junk bytes, resumed at the IDR");
+    }
+
+    // --- 4e. Cost: a full buffer without a random access point is examined once,
+    //      not on every call. The SRT receive loop calls this on each pass while
+    //      a resync is pending; a scan of the whole buffer per call starved
+    //      srt_recv() at high bitrates. ------------------------------------------
+    {
+        TsRingBuffer ring(4u * 1024 * 1024);
+        const std::vector<char> p = tsPacket(0x102, false, 0);
+        for (std::size_t i = 0; i < ring.capacity() / kPkt + 10; ++i) {
+            ring.append(p.data(), p.size());
+        }
+        const auto start = std::chrono::steady_clock::now();
+        bool resumed = false;
+        for (int i = 0; i < 2000; ++i) {
+            resumed |= ring.resyncToRandomAccess(0x100);
+            ring.append(p.data(), p.size());   // a little new data per call, as on the wire
+        }
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start).count();
+        ok &= expect(!resumed, "cost: no IDR, no resume");
+        ok &= expect(ms < 200, "cost: 2000 calls on a full 4 MB buffer take " + std::to_string(ms) +
+                                   " ms (a scan of the whole buffer per call took about 4 ms each)");
     }
 
     // --- 5. Wrap-around: appends spanning the end of the buffer stay correct. --

@@ -1,16 +1,19 @@
 #include "SrtSource.h"
 
+#include "SourceGapLog.h"
 #include "TsRingBuffer.h"
 
 #include <srt/srt.h>
 
 #include <QDebug>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <limits.h>
 #include <netdb.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -85,7 +88,8 @@ QString SrtSource::connect(const Config& cfg, int& sockOut) {
     return QString();
 }
 
-void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequested) {
+void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequested,
+                            const std::atomic<int>* resyncPid, SourceGapLog* gaps) {
     // SRT delivers TS in pkt_size chunks (typically 1316 = 7x188).
     //
     // The receive path must never block. Writing straight to the pipe did block:
@@ -108,6 +112,18 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
     if (flags >= 0) {
         ::fcntl(pipeFd, F_SETFL, flags | O_NONBLOCK);
     }
+#ifdef F_SETPIPE_SZ
+    // The ring drains into the pipe only when srt_recv() returns, and libsrt
+    // releases packets in bursts, so each burst can move at most what the pipe
+    // holds. At the 64 KiB default that barely exceeds a 45 Mbit/s feed: after
+    // any delay the reader cannot catch up, the ring stays full, and it keeps
+    // overflowing. A larger pipe lets one burst carry a backlog. Best effort:
+    // the default stays when the system limit is lower.
+    constexpr int kPipeBytes = 1024 * 1024;
+    if (::fcntl(pipeFd, F_SETPIPE_SZ, kPipeBytes) < 0) {
+        qWarning() << "[SRT] Pipe kept at its default size:" << strerror(errno);
+    }
+#endif
 
     TsRingBuffer ring(kRingCapacityBytes);
     std::uint64_t reportedDrops = 0;
@@ -116,10 +132,24 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
     int64_t lastRcvDrop = 0;
     int64_t lastRcvLoss = 0;
     char buf[kBufSize];
+    // Bytes written to the pipe so far: the offset of the next byte the reader
+    // gets, which is where a gap falls in what it reads.
+    std::uint64_t written = 0;
+    // A gap has been recorded and its resync has not completed yet.
+    bool gapOpen = false;
+
+    // The pipe only ever receives whole TS packets, in writes of at most
+    // PIPE_BUF bytes. POSIX makes such a write to a non-blocking pipe all or
+    // nothing, so a full pipe cannot accept part of a packet. If it could, a
+    // drop could then discard the rest of that packet, and the reader would
+    // lose the packet framing after the gap.
+    constexpr std::size_t kTsPacketSize = TsRingBuffer::kTsPacketSize;
+    constexpr std::size_t kMaxWrite = (PIPE_BUF / kTsPacketSize) * kTsPacketSize;
+    static_assert(kMaxWrite >= kTsPacketSize, "PIPE_BUF holds at least one TS packet");
 
     // Push as much as the reader will currently take; never blocks.
     const auto drainToPipe = [&]() {
-        if (ring.empty()) {
+        if (ring.size() < kTsPacketSize) {
             return;
         }
         // Only touch the pipe - and only pay for a resync scan - when the reader
@@ -130,13 +160,28 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
         if (::poll(&pfd, 1, 0) <= 0 || (pfd.revents & POLLOUT) == 0) {
             return;
         }
-        if (!ring.resyncToRandomAccess()) {
+        if (!ring.resyncToRandomAccess(resyncPid ? resyncPid->load(std::memory_order_relaxed) : -1)) {
             return;  // gap not yet re-anchored on an IDR; nothing safe to emit
         }
-        while (!ring.empty()) {
-            const ssize_t n = ::write(pipeFd, ring.frontData(), ring.frontContiguous());
+        gapOpen = false;
+        char wrapped[kTsPacketSize];
+        while (ring.size() >= kTsPacketSize) {
+            const char* data = ring.frontData();
+            std::size_t span = std::min(ring.frontContiguous(), kMaxWrite);
+            span -= span % kTsPacketSize;
+            if (span == 0) {
+                // The next packet wraps around the end of the ring: write it
+                // from a copy, still as one whole packet.
+                for (std::size_t i = 0; i < kTsPacketSize; ++i) {
+                    wrapped[i] = static_cast<char>(ring.at(i));
+                }
+                data = wrapped;
+                span = kTsPacketSize;
+            }
+            const ssize_t n = ::write(pipeFd, data, span);
             if (n > 0) {
                 ring.consume(static_cast<std::size_t>(n));
+                written += static_cast<std::uint64_t>(n);
                 continue;
             }
             if (n == 0) {
@@ -175,6 +220,15 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
         }
 
         ring.append(buf, static_cast<std::size_t>(received));
+        // The first drop of an episode fixes where the gap falls: everything
+        // already written comes before it, and nothing more is written until
+        // the ring resumes at a random access point.
+        if (ring.resyncPending() && !gapOpen) {
+            gapOpen = true;
+            if (gaps != nullptr) {
+                gaps->record(written);
+            }
+        }
 
         // Report ANY ring drop, rate-limited by time rather than volume. Reporting
         // only per buffer's-worth hid small drops entirely, which made a real media
@@ -183,7 +237,8 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
         const auto now = std::chrono::steady_clock::now();
         if (dropped > reportedDrops && now - lastDropLog >= std::chrono::seconds(2)) {
             qWarning() << "[SRT] ring dropped" << (dropped - reportedDrops)
-                       << "bytes (total" << dropped << ") - consumer behind";
+                       << "bytes (total" << dropped << ") - consumer behind; the published stream has a gap "
+                          "and resumes at a random access point";
             reportedDrops = dropped;
             lastDropLog = now;
         }

@@ -10,6 +10,8 @@
 
 namespace moq2ts {
 
+class SourceGapLog;
+
 /// Connects to an SRT source in caller mode and delivers received TS packets
 /// to a callback. The callback receives raw TS data (188-byte packets) in the
 /// same format as a file read - the existing M2tsPacketizer/LivePipeline can
@@ -38,8 +40,11 @@ public:
 
     /// Receive loop: reads TS data from the SRT socket and writes it to the
     /// given QIODevice (typically the write end of a pipe). Runs until
-    /// stopRequested is set. Call from a worker thread.
-    static void receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequested);
+    /// stopRequested is set. Call from a worker thread. After a drop, output
+    /// resumes at a random access point on resyncPid when it is set and >= 0,
+    /// and gaps, when set, records the offset of the gap in the bytes written.
+    static void receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequested,
+                            const std::atomic<int>* resyncPid = nullptr, SourceGapLog* gaps = nullptr);
 
     /// Clean up the SRT socket.
     static void close(int sock);

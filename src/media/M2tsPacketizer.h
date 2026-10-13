@@ -9,12 +9,15 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <utility>
 #include <vector>
 
 namespace moq2ts {
+
+class SourceGapLog;
 
 struct M2tsObject {
     QByteArray payload;
@@ -123,6 +126,9 @@ public:
     void setTransparent(bool transparent);      // unmodified carriage: forward every packet
     void setRetainSiTables(bool retain);         // keep SDT/EIT/TDT-TOT/NIT PIDs
     void setRetainNullPackets(bool retain);      // keep null (0x1FFF) packets
+    // Live source: where the stream skips ahead (SRT ingest). A Group starts at
+    // each gap, and the track starts after a gap found before its first Object.
+    void setSourceGaps(std::shared_ptr<SourceGapLog> gaps);
 
     bool open(int requestedProgramNumber, QString* error);
     bool readObject(int packetsPerObject, M2tsObject* object, QString* error);
@@ -148,9 +154,21 @@ public:
     // muxRateNote(). Valid after open().
     qint64 measuredMuxRate() const;
     QString muxRateNote() const;
+    // The rate in bit/s of the packets this track carries, measured against
+    // the PCR over the first second of the source, or 0 when it cannot be.
+    // Valid after open().
+    qint64 measuredBitrate() const;
+    // True when measuredBitrate() is also the maximum rate of the track: an
+    // unmodified track of a source with null stuffing, which is constant.
+    bool measuredBitrateIsConstant() const;
     // True when the first Object of every Group contains a random access point,
     // which the catalog then declares as mpeg2tsRandomAccess. Valid after open().
     bool randomAccess() const;
+    // False for an unmodified multiplex opened without a requested program: the
+    // catalog then names no reference program (draft "Unmodified Multiplex").
+    bool namesProgram() const;
+    // The PID whose random access points start Groups, or -1 while unknown.
+    int groupPid() const;
     std::uint64_t objectsRead() const;
     // True when the source is a non-seekable stream (FIFO, pipe, /dev/stdin),
     // i.e. a live feed rather than a seekable VOD file. Valid after open().
@@ -167,11 +185,20 @@ private:
     void handlePsiPacket(const QByteArray& tsPacket, const QByteArray& sourcePacket);
     void onPat(const PsiAssembler::Section& section);
     void onPmt(const PsiAssembler::Section& section);
+    bool psiComplete() const;
     // Per-program carriage: the PIDs to keep, and initData.
     bool selectProgramPids(QString* error);
     void selectPids();
     void refreshInitData();
-    void measureMuxRate();
+    // Measures measuredBitrate(), and measuredMuxRate() too when muxRate is set.
+    void measureRates(bool muxRate);
+    // The next source packet, and the offset of its first byte in the source.
+    QByteArray nextSourcePacket(std::uint64_t* offset);
+    // Before the first Object: when the source already skipped ahead, drop
+    // what came before the gap, so that the track starts at the live edge.
+    void skipToFirstGap();
+    // After a gap, the PSI sections in progress and the Group timing restart.
+    void restartAfterGap();
     // Per-program carriage: the rewriter of a table PID other than the PAT,
     // or nullptr, and the decision for each of its sections.
     SectionRewriter* rewriterFor(int pid);
@@ -242,8 +269,13 @@ private:
     bool m_ended = false;
     QString m_endReason;
     bool m_initDataChanged = false;
+    // The catalog declares initRef only if initData existed at open(); MSF
+    // Section 5.3 does not let a later catalog add it to the track.
+    bool m_initDataDeclared = false;
     qint64 m_measuredMuxRate = 0;
     QString m_muxRateNote;
+    qint64 m_measuredBitrate = 0;
+    bool m_measuredBitrateIsConstant = false;
 
     // PTS of the last Group start, and whether the 2-second warning was given.
     std::optional<std::uint64_t> m_lastGroupPtsUs;
@@ -279,6 +311,15 @@ private:
     bool m_sequential = false;
     QByteArray m_prebuffer;
     int m_prebufferPos = 0;
+
+    // Gaps of a live source. m_sourceOffset is the offset of the next source
+    // packet readObject takes. The packet that follows a gap ends the Object
+    // being filled; it waits in m_carryPacket and starts the next Group.
+    std::shared_ptr<SourceGapLog> m_sourceGaps;
+    std::uint64_t m_sourceOffset = 0;
+    QByteArray m_carryPacket;
+    std::uint64_t m_carryOffset = 0;
+    bool m_groupStartsAtGap = false;
 };
 
 } // namespace moq2ts

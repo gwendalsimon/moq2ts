@@ -1,4 +1,5 @@
 #include "media/M2tsPacketizer.h"
+#include "media/SourceGapLog.h"
 #include "ts_test_builder.h"
 
 #include <QDir>
@@ -12,6 +13,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -114,13 +116,13 @@ struct LiveRun {
     bool firstStartsGroup = false;
 };
 
-LiveRun publishLive(const QString& fifo, const QByteArray& data, bool transparent) {
+LiveRun publishLive(const QString& fifo, const QByteArray& data, bool transparent, int program = 0) {
     LiveRun live;
     ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
     std::thread writer([&] { writeFile(fifo, data); });
     M2tsPacketizer packetizer(fifo);
     packetizer.setTransparent(transparent);
-    if (packetizer.open(0, &live.run.error)) {
+    if (packetizer.open(program, &live.run.error)) {
         live.randomAccess = packetizer.randomAccess();
         live.initData = packetizer.initData();
         M2tsObject object;
@@ -451,14 +453,21 @@ int main() {
                              " live source without indicator: published from its first packet, no random access");
         }
 
-        // A live multiplex with a reference program (the first of the PAT,
-        // whose PMT is known) starts at that program's random access point and
-        // declares random access.
+        // A live multiplex with a reference program (--program 1, whose PMT is
+        // known) starts at that program's random access point, declares random
+        // access, and carries the PAT and that program's PMT as initData.
         const QByteArray multiplex = stream({{1, 0x1000}, {2, 0x1001}});
-        const LiveRun live = publishLive(dir.filePath("live-m.fifo"), multiplex, true);
+        const LiveRun live = publishLive(dir.filePath("live-m.fifo"), multiplex, true, 1);
         ok &= expect(live.randomAccess && !live.run.packets.isEmpty() && live.run.packets.first() == rap &&
-                         live.firstStartsGroup && live.initData.isEmpty(),
-                     "live multiplex: starts at the reference program's RAP, declares random access");
+                         live.firstStartsGroup && live.initData == multiplex.left(2 * 188),
+                     "live multiplex with --program: starts at the reference program's RAP, declares random access");
+        // Without a requested program, it names no reference program: it keeps
+        // its lead-in and declares nothing. Its initData is the PAT and the PMT
+        // of the first program, so the missing PMT of program 2 does not matter.
+        const LiveRun unnamed = publishLive(dir.filePath("live-m-unnamed.fifo"), multiplex, true);
+        ok &= expect(!unnamed.randomAccess && unnamed.run.packets.size() == 5 &&
+                         unnamed.initData == multiplex.left(2 * 188),
+                     "live multiplex without --program: lead-in kept, no random access, initData of the first program");
         // Without a reference program (no PMT known), it keeps its lead-in and
         // declares nothing.
         QByteArray noReference = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
@@ -644,26 +653,160 @@ int main() {
                      "mux rate: no null packets gives no value");
         ok &= expect(measure("mpts-rate.ts", stream({{1, 0x1000}, {2, 0x1001}}, 100, 3, 3000), &note) == 0,
                      "mux rate: not measured for an MPTS");
+
+        // The MSF bitrate: the packets the track carries, in every mode. An
+        // unmodified track carries every packet, so CBR or VBR, one program or
+        // several, it is the source rate. A per-program track without its null
+        // packets carries less.
+        const auto bitrate = [&](const QString& name, const QByteArray& ts, bool transparent) {
+            const QString path = dir.filePath(name);
+            writeFile(path, ts);
+            M2tsPacketizer packetizer(path);
+            packetizer.setTransparent(transparent);
+            QString error;
+            packetizer.open(0, &error);
+            return packetizer.measuredBitrate();
+        };
+        ok &= expect(bitrate("rate-u.ts", stream({{1, 0x1000}}, 100, 3, 3000), true) == 3008000,
+                     "bitrate: unmodified-program is the source rate");
+        ok &= expect(bitrate("rate-m.ts", stream({{1, 0x1000}, {2, 0x1001}}, 100, 3, 3000), true) == 3008000,
+                     "bitrate: unmodified-multiplex is the source rate");
+        ok &= expect(bitrate("rate-vbr.ts", stream({{1, 0x1000}}, 100, 0, 3000), true) == 3008000,
+                     "bitrate: measured without null packets too");
+        const qint64 perProgram = bitrate("rate-p.ts", stream({{1, 0x1000}}, 100, 3, 3000), false);
+        ok &= expect(perProgram > 1900000 && perProgram < 2100000,
+                     "bitrate: per-program without null packets counts the packets it keeps (" +
+                         std::to_string(perProgram) + ")");
+        ok &= expect(bitrate("rate-one-pcr.ts", stream({{1, 0x1000}}, 5000, 3, 3000), true) == 0,
+                     "bitrate: one PCR gives no value");
+        // The measure is the maximum (MSF bitrate) only where the rate is
+        // constant: an unmodified track of a source with null stuffing.
+        const auto constant = [&](const QString& name, const QByteArray& ts, bool transparent) {
+            const QString path = dir.filePath(name);
+            writeFile(path, ts);
+            M2tsPacketizer packetizer(path);
+            packetizer.setTransparent(transparent);
+            QString error;
+            packetizer.open(0, &error);
+            return packetizer.measuredBitrateIsConstant();
+        };
+        ok &= expect(constant("const-u.ts", stream({{1, 0x1000}}, 100, 3, 3000), true),
+                     "bitrate: constant for an unmodified track of a stuffed source");
+        ok &= expect(!constant("const-vbr.ts", stream({{1, 0x1000}}, 100, 0, 3000), true),
+                     "bitrate: not constant without null packets");
+        ok &= expect(!constant("const-p.ts", stream({{1, 0x1000}}, 100, 3, 3000), false),
+                     "bitrate: not constant for a per-program track, which drops the null packets");
     }
 
-    // A multiplex track goes on when its reference program leaves the PAT: the
-    // multiplex is still valid, and the reference fields are advisory.
+    // Source gaps (SRT ingest): no PCR discontinuity within a Group (draft "PCR
+    // and Timing"). A gap that comes after the first Object ends the Object
+    // being filled and starts a Group. One known before the first Object drops
+    // what came before it, so the track starts at the live edge.
+    {
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));            // 0
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));          // 1
+        ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), 0, 0x40);           // 2: RAP
+        ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), 1);                   // 3
+        ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), 2);                   // 4
+        ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), 3);                   // 5
+        ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(900000), 9, 0x40);         // 6: RAP after the gap
+        ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), 10);                  // 7
+        ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), 11);                  // 8
+        const auto packet = [&ts](int index) { return ts.mid(index * 188, 188); };
+        constexpr std::uint64_t gapOffset = 6 * 188;
+
+        struct GapRun {
+            QList<M2tsObject> objects;
+            QString error;
+        };
+        // gapBeforeFirst: the gap is known at open(); otherwise it is recorded
+        // once the first Object is out.
+        const auto run = [&](const QString& name, bool gapBeforeFirst, std::uint64_t offset) {
+            GapRun result;
+            const QString fifo = dir.filePath(name);
+            ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+            std::thread writer([&] { writeFile(fifo, ts); });
+            auto gaps = std::make_shared<moq2ts::SourceGapLog>();
+            M2tsPacketizer packetizer(fifo);
+            packetizer.setTransparent(true);
+            packetizer.setSourceGaps(gaps);
+            if (gapBeforeFirst) {
+                gaps->record(offset);
+            }
+            if (packetizer.open(0, &result.error)) {
+                M2tsObject object;
+                while (packetizer.readObject(3, &object, &result.error)) {
+                    result.objects.append(object);
+                    if (!gapBeforeFirst && result.objects.size() == 1) {
+                        gaps->record(offset);
+                    }
+                }
+            }
+            writer.join();
+            return result;
+        };
+
+        const GapRun mid = run("gap-mid.fifo", false, gapOffset);
+        ok &= expect(mid.error.isEmpty() && mid.objects.size() == 3, "gap after the first Object: three Objects");
+        if (mid.objects.size() == 3) {
+            ok &= expect(mid.objects[0].payload == packet(2) + packet(3) + packet(4) && mid.objects[0].groupId == 0,
+                         "gap after the first Object: Group 0 starts at the first RAP");
+            ok &= expect(mid.objects[1].payload == packet(5) && mid.objects[1].groupId == 0 &&
+                             !mid.objects[1].startsGroup,
+                         "gap after the first Object: the Object before the gap ends at it");
+            ok &= expect(mid.objects[2].payload == packet(6) + packet(7) + packet(8) &&
+                             mid.objects[2].groupId == 1 && mid.objects[2].objectId == 0 &&
+                             mid.objects[2].startsGroup,
+                         "gap after the first Object: Group 1 starts where the source resumed");
+        }
+
+        const GapRun first = run("gap-first.fifo", true, gapOffset);
+        ok &= expect(first.error.isEmpty() && first.objects.size() == 1 &&
+                         first.objects[0].payload == packet(6) + packet(7) + packet(8) &&
+                         first.objects[0].groupId == 0 && first.objects[0].startsGroup,
+                     "gap before the first Object: the track starts where the source resumed, in Group 0");
+
+        const GapRun none = run("gap-zero.fifo", true, 0);
+        ok &= expect(none.error.isEmpty() && none.objects.size() == 3 &&
+                         none.objects[0].payload == packet(2) + packet(3) + packet(4) &&
+                         none.objects[1].payload == packet(5) + packet(6) + packet(7) &&
+                         none.objects[1].groupId == 1 && none.objects[2].groupId == 1,
+                     "gap at offset 0: no gap, the Groups follow the RAPs");
+    }
+
+    // A multiplex without a reference program goes on when the program whose
+    // random access points cut Groups leaves the PAT: the catalog names no
+    // program. With --program, the catalog names it, so the track ends (draft
+    // "Catalog": a new program number needs a new track).
     {
         const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
-        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}, {3, 0x1002}}, 0), 0);
         ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
-        ts += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1), 1) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}, {3, 0x1002}}, 1), 1) + video;
         const QString path = dir.filePath("reference-leaves.ts");
         ok &= expect(writeFile(path, ts), "write reference-leaves stream");
         const Run run = publish(path, true);
-        ok &= expect(run.error.isEmpty() && run.packets.size() == 5, "multiplex: the track goes on");
+        ok &= expect(run.error.isEmpty() && run.packets.size() == 5, "multiplex without reference: the track goes on");
+        const Run named = publish(path, true, 1);
+        ok &= expect(named.packets.size() == 3 && named.error.contains("Reference program 1 left"),
+                     "multiplex with --program 1: the track ends when program 1 leaves the PAT");
+
+        // Draft "Unmodified Multiplex": MUST NOT be used for a one-program PAT.
+        QByteArray single = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        single += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        single += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1), 1) + video;
+        const QString singlePath = dir.filePath("multiplex-to-single.ts");
+        ok &= expect(writeFile(singlePath, single), "write multiplex-to-single stream");
+        const Run toSingle = publish(singlePath, true);
+        ok &= expect(toSingle.packets.size() == 3 && toSingle.error.contains("no longer a multiplex"),
+                     "multiplex whose PAT drops to one program: the track ends");
 
         // Groups go on, on the video of the first program still listed, once its
         // PMT arrives. An audio indicator before that PMT starts no Group.
         const auto rap = [](int pid, int cc) { return tb::tsPacket(pid, true, tb::pesHeaderWithPts(9000 * cc), cc, 0x40); };
-        QByteArray moved = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        QByteArray moved = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}, {3, 0x1002}}, 0), 0);
         moved += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + rap(0x100, 0) + rap(0x100, 1);
-        moved += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1), 1) + rap(0x201, 0);
+        moved += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}, {3, 0x1002}}, 1), 1) + rap(0x201, 0);
         moved += tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}, {0x0F, 0x201}})) + rap(0x200, 0) + rap(0x200, 1);
         const QString movedPath = dir.filePath("reference-moves.ts");
         ok &= expect(writeFile(movedPath, moved), "write reference-moves stream");
@@ -719,6 +862,29 @@ int main() {
             ok &= expect(count == expected, "Group duration warning for a spacing of " + std::to_string(spacing / 90) +
                                                 " ms: " + std::to_string(count));
         }
+
+        // The Group length runs from one random access point to the next, not
+        // from the first video PES of the Object: here a frame 40 ms before the
+        // first random access point opens its Object, and the points are 2 s
+        // apart.
+        warnings().clear();
+        QByteArray early = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        early += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        early += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(900000 - 3600), 0);          // Object 1
+        early += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(900000), 1, 0x40);
+        early += tb::tsPacket(0x100, false, QByteArray(184, char(0)), 2);                    // Object 2
+        early += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(900000 + 180000), 3, 0x40);
+        const QString earlyPath = dir.filePath("gop-early-frame.ts");
+        writeFile(earlyPath, early);
+        M2tsPacketizer earlyPacketizer(earlyPath);
+        QString earlyError;
+        M2tsObject earlyObject;
+        if (earlyPacketizer.open(0, &earlyError)) {
+            while (earlyPacketizer.readObject(2, &earlyObject, &earlyError)) {
+            }
+        }
+        ok &= expect(warnings().filter("longer than the 2 s").isEmpty(),
+                     "Group duration: random access points 2 s apart give no warning when a frame precedes one");
         qInstallMessageHandler(nullptr);
     }
 
@@ -766,6 +932,125 @@ int main() {
         ok &= expect(unwrapper.unwrap(997000) == 997000, "unwrap: B-frame step back kept");
         ok &= expect(unwrapper.unwrap(9000) == 997000, "unwrap: loop does not go back");
         ok &= expect(unwrapper.unwrap(12003) == 1000003, "unwrap: media time continues after the loop");
+    }
+
+    // Unmodified multiplex (draft "Unmodified Multiplex", "Use of MSF
+    // Initialization Data"): every source packet goes out unchanged, a
+    // reference program is named only on request, and initData carries the PAT
+    // with the PMT of the reference program: the first program in the PAT when
+    // none is named.
+    {
+        const QByteArray mux = stream({{1, 0x1000}, {2, 0x1001}});
+        const QString path = dir.filePath("mux.ts");
+        ok &= expect(writeFile(path, mux), "write multiplex");
+
+        M2tsPacketizer unnamed(path);
+        unnamed.setTransparent(true);
+        QString error;
+        ok &= expect(unnamed.open(0, &error), "multiplex opens: " + error.toStdString());
+        ok &= expect(!unnamed.namesProgram() && !unnamed.randomAccess(), "multiplex without --program names no program");
+        ok &= expect(unnamed.initData() == mux.left(2 * 188),
+                     "multiplex initData: the PAT and the PMT of the first program");
+        QByteArray out;
+        M2tsObject object;
+        while (unnamed.readObject(4, &object, &error)) {
+            out += object.payload;
+        }
+        ok &= expect(out == mux, "multiplex file: byte-for-byte");
+
+        M2tsPacketizer named(path);
+        named.setTransparent(true);
+        ok &= expect(named.open(2, &error), "multiplex with --program 2 opens: " + error.toStdString());
+        ok &= expect(named.namesProgram() && named.programNumber() == 2 && named.pcrPid() == 0x100,
+                     "multiplex with --program 2 names program 2");
+        ok &= expect(named.initData() == mux.left(188) + mux.mid(2 * 188, 188),
+                     "multiplex with --program 2: initData is the PAT and the PMT of program 2");
+
+        M2tsPacketizer missing(path);
+        missing.setTransparent(true);
+        ok &= expect(!missing.open(9, &error) && error.contains("program 9"),
+                     "multiplex with --program 9: refused, the PAT does not list it");
+
+        const LiveRun live = publishLive(dir.filePath("mux-live.fifo"), mux, true);
+        QByteArray liveOut;
+        for (const QByteArray& payload : live.run.packets) {
+            liveOut += payload;
+        }
+        ok &= expect(live.run.error.isEmpty() && liveOut == mux && live.initData == mux.left(2 * 188),
+                     "live multiplex: byte-for-byte, initData with the PMT of the first program");
+    }
+
+    // Without a PAT, the unmodified mode cannot be chosen, so the track is
+    // refused.
+    {
+        QByteArray ts;
+        for (int cc = 0; cc < 4; ++cc) {
+            ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), cc);
+        }
+        const QString path = dir.filePath("no-pat.ts");
+        ok &= expect(writeFile(path, ts), "write stream without a PAT");
+        const Run run = publish(path, true);
+        ok &= expect(run.packets.isEmpty() && run.error.contains("No PAT"), "unmodified without a PAT: refused");
+    }
+
+    // A multiplex without a reference program: initData is the PAT and the PMT
+    // of the first program in the PAT. A new PMT of that program updates it, a
+    // new PMT of another program does not, and when the first program leaves
+    // the PAT the next one takes over. initData that was missing at open()
+    // stays missing: a later catalog cannot add initRef (MSF Section 5.3).
+    {
+        const QByteArray pat = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
+        const QByteArray pmt1 = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        const QByteArray pmt1v1 = tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}, {0x0F, 0x101}}, 1), 1);
+        const QByteArray pmt2 = tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}}), 0);
+        const QByteArray pmt2v1 = tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}, {0x0F, 0x201}}, 1), 1);
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        const auto changes = [&](const QString& name, const QByteArray& ts, QByteArray* initData) {
+            const QString path = dir.filePath(name);
+            writeFile(path, ts);
+            M2tsPacketizer packetizer(path);
+            packetizer.setTransparent(true);
+            QString error;
+            packetizer.open(0, &error);
+            M2tsObject object;
+            bool changed = false;
+            while (packetizer.readObject(1, &object, &error)) {
+                changed |= packetizer.takeInitDataChange(initData);
+            }
+            return changed;
+        };
+        QByteArray initData;
+        ok &= expect(changes("mux-pmt1-change.ts", pat + pmt1 + pmt2 + video + pmt1v1 + video, &initData) &&
+                         initData == pat + pmt1v1,
+                     "multiplex: a new PMT of the first program updates initData");
+        ok &= expect(!changes("mux-pmt2-change.ts", pat + pmt1 + pmt2 + video + pmt2v1 + video, &initData),
+                     "multiplex: a new PMT of another program leaves initData unchanged");
+
+        const QByteArray pat3 = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}, {3, 0x1002}}, 0), 0);
+        const QByteArray pat23 = tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}, {3, 0x1002}}, 1), 1);
+        const QByteArray pmt3 = tb::psiPacket(0x1002, tb::pmtSection(3, 0x300, {{0x1B, 0x300}}));
+        ok &= expect(changes("mux-first-leaves.ts", pat3 + pmt1 + pmt2 + pmt3 + video + pat23 + pmt2 + video, &initData) &&
+                         initData == pat23 + pmt2,
+                     "multiplex: when the first program leaves, initData carries the PMT of the next first program");
+
+        QByteArray late = pat + pmt2;
+        for (int index = 0; index < 20000; ++index) {
+            late += tb::tsPacket(0x1FFF, false, QByteArray(184, char(0xFF)));
+        }
+        late += pmt1 + video;
+        const QString latePath = dir.filePath("mux-late-pmt.ts");
+        ok &= expect(writeFile(latePath, late), "write multiplex with a late PMT");
+        M2tsPacketizer latePacketizer(latePath);
+        latePacketizer.setTransparent(true);
+        QString error;
+        ok &= expect(latePacketizer.open(0, &error) && latePacketizer.initData().isEmpty(),
+                     "multiplex: no initData while the PMT of the first program is missing at open");
+        M2tsObject object;
+        bool changed = false;
+        while (latePacketizer.readObject(64, &object, &error)) {
+            changed |= latePacketizer.takeInitDataChange(&initData);
+        }
+        ok &= expect(!changed, "multiplex: initData missing at open is not added later");
     }
 
     if (ok) {
