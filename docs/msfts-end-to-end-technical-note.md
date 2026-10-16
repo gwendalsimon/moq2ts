@@ -5,7 +5,8 @@
 This document follows one continuous MPEG-TS stream from a camera/encoder onto the
 **MOQ** transport. The two primer sections below explain just enough of each to
 make the rest readable, and every stage is drawn as a diagram before it is
-described in words.
+described in words. The packaging reference is
+[MSFTS draft 02](draft-gregoire-moq-msfts-02.txt).
 
 It covers the publisher only. The pipeline has two roles here:
 
@@ -255,9 +256,10 @@ that keeps only selected PIDs, but MSFTS runs transparent.)
 
 ## A5. Where groups begin - guaranteeing a keyframe at the start of every group
 
-This is the heart of MSFTS. A MOQ **group must be independently decodable**, so a
-group may only start where a **keyframe (IDR)** starts - and the encoder marks that
-spot with the **random_access_indicator** bit.
+On a live single-program track, MSFTS recommends starting Groups at random
+access points. The catalog may claim `mpeg2tsRandomAccess = true` only when the
+first Object of every Group contains the first TS packet of such a point. The
+encoder marks it with the **random_access_indicator** bit.
 
 As each object is assembled, the publisher scans its packets:
 
@@ -281,12 +283,13 @@ GROUP BOUNDARY LOGIC
   yes  (any later RAP)               true              ++groupId, reset objectId = 0
 ```
 
-Result: **the object that contains a keyframe always becomes object 0 of a new
+Normally, **the object that contains a keyframe becomes object 0 of a new
 group.** Because grouping is object-granular (not packet-granular), object 0 holds
 the keyframe packet plus its neighbours; TS/PES are self-framing, so a subscriber
 that starts at object 0 always has a complete IDR to initialize its decoder. This
-is exactly what the catalog advertises as `mpeg2tsRandomAccess = true`. (For the exact
-byte-vs-IDR interaction - objects are *not* cut short at the keyframe on this path -
+supports that catalog claim when it holds for every Group. SRT omits the claim
+because gap recovery can fall back to a packet boundary without a random access
+point. (For the exact byte-vs-IDR interaction - objects are *not* cut short at the keyframe on this path -
 and a measured worked example, see [A8](#a8-objects-vs-groups--how-byte-sizing-and-idr-grouping-interact).)
 
 ```
@@ -312,7 +315,7 @@ catalog (JSON)
     |   +-- packaging          = "mpeg2ts"  -> payload is raw TS packets
     |   +-- mpeg2tsMode        = "unmodified-multiplex" or "per-program"
     |   +-- mpeg2tsPacketSize  = 188 or 192 -> bytes per TS packet
-    |   +-- mpeg2tsRandomAccess = true      -> every group starts at a keyframe
+    |   +-- mpeg2tsRandomAccess = true      -> only when every group has a random access point
     |   +-- role/mimeType/namespace/bitrate
     |   +-- targetLatency      = 1000       -> advisory latency target (ms)
     +-- program-1.timeline     (media-timeline side track)

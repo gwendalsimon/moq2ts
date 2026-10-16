@@ -68,7 +68,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--transparent`, `--publish-multiplex` | off | Aliases of `--unmodified`; `--transparent` is kept for existing scripts |
 | `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT). The SDT and the EIT keep the carried service only; the NIT, BAT, TDT, and TOT pass unchanged |
 | `--retain-null` | off | Per-program mode: also keep null (0x1FFF) packets |
-| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s. With 0, a per-program track of a single-program source without `--retain-null` measures the rate from the PCR when the source carries null packets, and a warning says when no rate is declared. The draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--unmodified` and SRT ingest drop it when the source PAT lists several programs, and warn |
+| `--mux-rate <bps>` | `0` | Advisory stuffing target for `per-program` carriage and a candidate for the MSF `bitrate` field. With 0, a per-program track of a single-program source without `--retain-null` measures the rate from the PCR when the source carries null packets, and a warning says when no rate is declared. MSFTS-02 forbids `mpeg2tsMuxRate` in both unmodified modes; an explicit value there produces a warning and is omitted from that field |
 | `--fragment-ms <ms>` | `250` | Group cadence |
 | `--segment-bytes <n>` | `65536` | Target object size |
 | `--draft <n>` | `16` | MOQ draft version: 14, 16, 17 or 18. The relay must list it in `moqt_versions`; any other value is refused |
@@ -136,8 +136,8 @@ ingest side before the publisher ever sees the bytes.
 **SRT ingest always uses unmodified carriage** (`--publish-multiplex` says so
 explicitly). A contribution feed is forwarded as received, so the per-program
 options (`--retain-si`, `--retain-null`) do not apply and are ignored; passing
-them prints a warning. The catalog drops `mpeg2tsMuxRate` when the source PAT
-lists several programs, but `--mux-rate` still bounds the catalog `bitrate`
+them prints a warning. The catalog omits `mpeg2tsMuxRate` for either
+unmodified mode, but `--mux-rate` remains a candidate for catalog `bitrate`
 (see [DEVELOPER.md](DEVELOPER.md)). Use a file or FIFO source if you need
 per-program publishing.
 
@@ -159,8 +159,8 @@ ffmpeg -hide_banner -re \
   -muxrate 6000000 -f mpegts "srt://0.0.0.0:9000?mode=listener&pkt_size=1316"
 ```
 
-`-g 50` at 25 fps gives a random access point every 2 s, the longest Group that
-MSFTS recommends. To keep a byte-for-byte copy of what was sent, see the
+`-g 50` at 25 fps gives a random access point every 2 s. MSFTS-02 sets no
+maximum Group duration. To keep a byte-for-byte copy of what was sent, see the
 end-to-end test in [tests/srt-mpts-e2e.sh](../tests/srt-mpts-e2e.sh).
 
 A multi-program feed is published as one `unmodified-multiplex` track:
@@ -169,7 +169,7 @@ A multi-program feed is published as one `unmodified-multiplex` track:
 |---|---|---|
 | Track name | `mux-1` | `mux-1-pN` |
 | `mpeg2tsProgramNumber`, `mpeg2tsPcrPid` | absent | program N and its PCR PID |
-| `mpeg2tsRandomAccess` | absent | true when Groups start at random access points of N |
+| `mpeg2tsRandomAccess` | absent | absent for SRT, whose recovery fallback can resume without a random access point |
 | initialization data | the PAT and the PMT of the first program in the PAT | the PAT and the PMT of N |
 | a program leaves the PAT | the track goes on | the track ends when N leaves |
 | the PAT lists one program | the track ends | the track ends |
@@ -185,9 +185,10 @@ only when that PMT arrived at the start; it is never added later.
 
 The SRT receive buffer holds about 5 s. While nothing reads it, for example
 while the publisher waits for its first subscriber, it keeps the newest media
-and drops the oldest. The stream then resumes at a random access point of the
-PID that starts Groups, and the gap falls on a Group boundary, never inside a
-Group. The packets are not modified to mark it: in the unmodified modes a
+and drops the oldest. The stream tries to resume at a random access point of the
+PID that starts Groups. If none arrives, the safety fallback can resume at a
+packet boundary. Either way the gap starts a new Group, never one already in
+progress. The packets are not modified to mark it: in the unmodified modes a
 discontinuity in the source reaches the subscriber unchanged (draft "PCR and
 Timing"). A gap before the first Object is not published at all: the track
 starts at the live edge, and the data read before the gap is dropped with a
@@ -238,8 +239,8 @@ the one PMT of an `unmodified-program`, and for an `unmodified-multiplex` the
 PMT of its reference program: the one `--program` names, or the first program
 in the PAT without it.
 An `unmodified-multiplex` catalog names its reference program in
-`mpeg2tsProgramNumber` and `mpeg2tsPcrPid` only with `--program`, and never
-contains `mpeg2tsMuxRate`.
+`mpeg2tsProgramNumber` and `mpeg2tsPcrPid` only with `--program`. Neither
+unmodified mode contains `mpeg2tsMuxRate`.
 
 In per-program mode the PAT/PMT bootstrap (with the rewritten PAT) is carried the way MSF-01 defines it: the
 track gets an `initRef` string, and the bytes live in a root `initDataList` entry

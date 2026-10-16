@@ -397,15 +397,11 @@ void LivePipeline::runLoop() {
                      qUtf8Printable(packetizer.muxRateNote()));
         }
     }
+    if (m_config.transparentMode && m_config.mpeg2tsMuxRateBps > 0) {
+        qWarning("--mux-rate is not declared as mpeg2tsMuxRate: MSFTS forbids the field in both "
+                 "unmodified modes. It remains a candidate for the catalog bitrate.");
+    }
     if (multiplex) {
-        // The draft forbids mpeg2tsMuxRate in this mode (draft "Mux Rate"), so
-        // the catalog leaves it out. Only now, with the PAT read, is it known.
-        if (m_config.mpeg2tsMuxRateBps > 0) {
-            qWarning("--mux-rate is not declared as mpeg2tsMuxRate: the source PAT lists %d programs, and "
-                     "the draft forbids the field for an unmodified multiplex. It still sets the catalog "
-                     "bitrate.",
-                     packetizer.patProgramCount());
-        }
         if (packetizer.namesProgram()) {
             emit status(QStringLiteral("unmodified-multiplex track %1: reference program %2, PCR PID %3.")
                             .arg(trackName)

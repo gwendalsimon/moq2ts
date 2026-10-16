@@ -101,9 +101,9 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
     // Instead, received data goes into a bounded ring buffer and the pipe is
     // written non-blocking. While the reader is stalled the ring keeps the most
     // recent media and discards the oldest, so the wait is effectively unbounded;
-    // when the reader starts draining, output resumes at the next random access
-    // point, so it stays decodable and the subscriber joins at the live edge
-    // rather than replaying stale media.
+    // when the reader starts draining, output tries to resume at a random
+    // access point near the live edge rather than replaying stale media. The
+    // ring's safety fallback can resume without one.
     constexpr int kBufSize = 1316 * 4;                            // up to 28 TS packets per recv
     constexpr std::size_t kRingCapacityBytes = 4u * 1024 * 1024;  // ~5 s at 6 Mbit/s
 
@@ -238,7 +238,7 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
         if (dropped > reportedDrops && now - lastDropLog >= std::chrono::seconds(2)) {
             qWarning() << "[SRT] ring dropped" << (dropped - reportedDrops)
                        << "bytes (total" << dropped << ") - consumer behind; the published stream has a gap "
-                          "and resumes at a random access point";
+                          "and will try to resume at a random access point";
             reportedDrops = dropped;
             lastDropLog = now;
         }

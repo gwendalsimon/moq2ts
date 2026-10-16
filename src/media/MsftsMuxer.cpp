@@ -47,8 +47,8 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     mediaTrack.insert(QStringLiteral("mpeg2tsMode"), modeName(catalog.mode));
     // In unmodified-multiplex the publisher MAY name a reference program, on
     // whose PCR a subscriber paces the multiplex. The track names it only when
-    // its PCR PID is known. mpeg2tsMuxRate and mpeg2tsSiPids stay forbidden in
-    // that mode.
+    // its PCR PID is known. mpeg2tsMuxRate is forbidden in both unmodified
+    // modes; mpeg2tsSiPids is forbidden in unmodified-multiplex.
     const bool multiplex = catalog.mode == Mpeg2tsMode::UnmodifiedMultiplex;
     const bool namesProgram = !multiplex || catalog.pcrPid >= 0;
     if (namesProgram) {
@@ -57,8 +57,8 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
             mediaTrack.insert(QStringLiteral("mpeg2tsPcrPid"), catalog.pcrPid);
         }
     }
-    if (!multiplex) {
-        // Advisory source constant mux rate.
+    if (catalog.mode == Mpeg2tsMode::PerProgram) {
+        // The rate is a stuffing target for a derived program.
         if (catalog.mpeg2tsMuxRateBps > 0) {
             mediaTrack.insert(QStringLiteral("mpeg2tsMuxRate"), catalog.mpeg2tsMuxRateBps);
         }

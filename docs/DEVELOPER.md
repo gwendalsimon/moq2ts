@@ -274,8 +274,9 @@ With `--program N` it is named `mux-1-pN`, and its `mpeg2tsProgramNumber` and
 paces the multiplex. Without `--program` the catalog names no program. The
 initialization data is the source PAT with the PMT of the reference program,
 which is the first program in the PAT without `--program` (draft "Use of MSF
-Initialization Data" and "Unmodified Multiplex"). It never carries `mpeg2tsMuxRate` or
-`mpeg2tsSiPids`. The track ends when the PAT lists one program, or when the
+Initialization Data" and "Unmodified Multiplex"). Neither unmodified mode
+carries `mpeg2tsMuxRate`; the multiplex also omits `mpeg2tsSiPids`. The track
+ends when the PAT lists one program, or when the
 reference program leaves it.
 
 Field presence is conditional:
@@ -295,18 +296,19 @@ Field presence is conditional:
   than zero.
 - `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` are emitted outside
   `unmodified-multiplex`, and in it only with `--program`.
-  `mpeg2tsMuxRate` is emitted outside `unmodified-multiplex` when positive.
+  `mpeg2tsMuxRate` is emitted only in `per-program` mode when positive.
 - `mpeg2tsSiPids` is emitted only in `per-program` mode.
 - `mpeg2tsTimestampMode` is valid only for 192-octet source packets and MUST
   NOT appear for 188.
 - `mpeg2tsRandomAccess` is advertised only when the first Object of every
-  Group contains a random access point. A live source (pipe, FIFO, SRT)
+  Group contains a random access point. A live source (pipe or FIFO)
   drops the packets before its first random access point and declares it,
   if the source sets the random_access_indicator on its video PID (or on the
   PCR PID without video). On `unmodified-multiplex`, these are the points of
   the reference program, and a multiplex without one declares nothing. A
-  file keeps byte 0 and does not declare it. Groups longer than 2 seconds
-  give one warning.
+  file keeps byte 0 and does not declare it. SRT also omits the field: its
+  recovery safety fallback may start a Group without a random access point.
+  Groups longer than 2 seconds give an operational warning, not a draft violation.
 
 ## Timeline track
 

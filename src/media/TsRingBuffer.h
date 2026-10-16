@@ -22,9 +22,9 @@ namespace moq2ts {
 // Two invariants keep the discarded data from corrupting the stream:
 //   * drops are made in whole 188-byte TS packets, so the byte stream stays
 //     packet aligned across a gap; and
-//   * any drop raises a resync flag - resyncToRandomAccess() then skips forward
-//     to a random access point (IDR) before anything else is emitted, so the
-//     output remains decodable across the discontinuity.
+//   * any drop raises a resync flag - resyncToRandomAccess() then tries to skip
+//     forward to a random access point (IDR) before anything else is emitted.
+//     Its safety fallback keeps the stream moving if no such packet arrives.
 //
 // Not thread-safe: intended to be appended to and drained from the same thread.
 class TsRingBuffer {

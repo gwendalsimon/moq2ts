@@ -56,8 +56,8 @@ struct MsftsCatalog {
     // program, UnmodifiedMultiplex otherwise. PerProgram is a program derived by
     // filtering.
     Mpeg2tsMode mode = Mpeg2tsMode::PerProgram;
-    // Advisory source constant mux rate in bits/s. Emitted as mpeg2tsMuxRate
-    // only when > 0 and the mode is not UnmodifiedMultiplex.
+    // Advisory stuffing target in bits/s. Emitted as mpeg2tsMuxRate only when
+    // > 0 and the mode is PerProgram.
     qint64 mpeg2tsMuxRateBps = 0;
 
     // MSF common track/root fields (draft-ietf-moq-msf-01).

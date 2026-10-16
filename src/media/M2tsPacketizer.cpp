@@ -1201,15 +1201,13 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
                  static_cast<unsigned long long>(m_currentGroupId),
                  rapDetected ? "" : ", which is not a random access point of the group PID");
     }
-    // Draft "Group Boundaries": a Group SHOULD NOT last longer than 2 seconds.
-    // Groups follow the random access points of the source, so say once when
-    // two of them are further apart.
+    // Report long GOPs as an operational latency hint. MSFTS-02 does not set a
+    // maximum Group duration.
     const std::optional<std::uint64_t> groupPtsUs = rapPtsUs.has_value() ? rapPtsUs : object->ptsUs;
     if (rapDetected && groupPtsUs.has_value()) {
         if (m_lastGroupPtsUs.has_value() && !m_warnedLongGroup && *groupPtsUs > *m_lastGroupPtsUs + 2000000) {
             m_warnedLongGroup = true;
-            qWarning("Random access points %.2f s apart: a Group lasts longer than the 2 s that MSFTS "
-                     "recommends. Shorten the GOP at the encoder.",
+            qWarning("Random access points %.2f s apart: consider a shorter GOP for faster live joins.",
                      static_cast<double>(*groupPtsUs - *m_lastGroupPtsUs) / 1e6);
         }
         m_lastGroupPtsUs = groupPtsUs;
@@ -1450,7 +1448,9 @@ bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
 }
 
 bool M2tsPacketizer::randomAccess() const {
-    return m_dropLeadIn;
+    // SRT recovery can fall back to a packet boundary without a RAP. A track
+    // with source gaps cannot promise that every Group begins at one.
+    return m_dropLeadIn && !m_sourceGaps;
 }
 
 bool M2tsPacketizer::namesProgram() const {

@@ -718,6 +718,7 @@ int main() {
         struct GapRun {
             QList<M2tsObject> objects;
             QString error;
+            bool randomAccess = false;
         };
         // gapBeforeFirst: the gap is known at open(); otherwise it is recorded
         // once the first Object is out.
@@ -734,6 +735,7 @@ int main() {
                 gaps->record(offset);
             }
             if (packetizer.open(0, &result.error)) {
+                result.randomAccess = packetizer.randomAccess();
                 M2tsObject object;
                 while (packetizer.readObject(3, &object, &result.error)) {
                     result.objects.append(object);
@@ -747,6 +749,7 @@ int main() {
         };
 
         const GapRun mid = run("gap-mid.fifo", false, gapOffset);
+        ok &= expect(!mid.randomAccess, "gap-capable live track does not promise random access");
         ok &= expect(mid.error.isEmpty() && mid.objects.size() == 3, "gap after the first Object: three Objects");
         if (mid.objects.size() == 3) {
             ok &= expect(mid.objects[0].payload == packet(2) + packet(3) + packet(4) && mid.objects[0].groupId == 0,
@@ -841,8 +844,8 @@ int main() {
                      "SDT without the service: dropped, one warning");
     }
 
-    // Groups longer than 2 seconds give one warning; Groups 2 seconds apart do
-    // not.
+    // The operational latency warning fires once for GOPs over 2 seconds;
+    // MSFTS-02 does not require that limit.
     {
         const auto gops = [](std::uint64_t spacing90k) {
             QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
@@ -858,7 +861,7 @@ int main() {
             const QString path = dir.filePath(QStringLiteral("gop-%1.ts").arg(spacing));
             writeFile(path, gops(spacing));
             publish(path, false);
-            const int count = static_cast<int>(warnings().filter("longer than the 2 s").size());
+            const int count = static_cast<int>(warnings().filter("consider a shorter GOP").size());
             ok &= expect(count == expected, "Group duration warning for a spacing of " + std::to_string(spacing / 90) +
                                                 " ms: " + std::to_string(count));
         }
@@ -883,7 +886,7 @@ int main() {
             while (earlyPacketizer.readObject(2, &earlyObject, &earlyError)) {
             }
         }
-        ok &= expect(warnings().filter("longer than the 2 s").isEmpty(),
+        ok &= expect(warnings().filter("consider a shorter GOP").isEmpty(),
                      "Group duration: random access points 2 s apart give no warning when a frame precedes one");
         qInstallMessageHandler(nullptr);
     }

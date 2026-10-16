@@ -10,9 +10,10 @@ namespace moq2ts {
 // Where a live source's byte stream skips ahead.
 //
 // The SRT receive thread discards the oldest buffered media when nothing reads
-// the pipe for longer than its ring holds, then resumes at a random access
-// point. Only that thread knows where the gap falls, while the packetizer on
-// the other end of the pipe decides the Group boundaries. A gap inside a Group
+// the pipe for longer than its ring holds, then tries to resume at a random
+// access point. Its safety fallback can resume at a packet boundary. Only that
+// thread knows where the gap falls, while the packetizer on the other end of
+// the pipe decides the Group boundaries. A gap inside a Group
 // is a PCR discontinuity inside it, which the draft forbids ("PCR and Timing"),
 // and the unmodified modes may not mark it in the packets. So the writer
 // records the offset of each gap in the byte stream it writes, and the reader

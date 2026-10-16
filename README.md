@@ -7,6 +7,7 @@ using a moqxr-oriented publishing adapter.
 The media pipeline is designed around M2TS input and produces
 `draft-gregoire-moq-msfts` media objects: each object payload is a
 concatenation of whole 188-byte TS packets or 192-byte M2TS source packets.
+The checked-in MSFTS reference is [draft 02](docs/draft-gregoire-moq-msfts-02.txt).
 
 The application targets:
 
@@ -146,6 +147,8 @@ exists. Launch the packaged app with:
   modes, and `mpeg2tsRandomAccess` when the first Object of every Group
   contains a random access point).
   `mpeg2tsTimestampMode` is emitted only for 192-octet source packets.
+  `mpeg2tsMuxRate` appears only for derived `per-program` tracks; SRT tracks
+  omit `mpeg2tsRandomAccess` because recovery can start without a keyframe.
 - **Initialization data**: the packetizer scans the start of the source for
   PAT and PMT packets and emits them as Base64 `initData`, preserving 188-byte
   or 192-byte source-packet form.

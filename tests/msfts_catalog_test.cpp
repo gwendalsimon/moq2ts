@@ -44,7 +44,7 @@ int main() {
         ok &= expect(track.value("mpeg2tsMode").toString() == "unmodified-program", "unmodified-program: mode");
         ok &= expect(track.value("mpeg2tsProgramNumber").toInt() == 1, "unmodified-program: program number");
         ok &= expect(track.value("mpeg2tsPcrPid").toInt() == 256, "unmodified-program: PCR PID");
-        ok &= expect(static_cast<qint64>(track.value("mpeg2tsMuxRate").toDouble()) == 8000000, "unmodified-program: mux rate");
+        ok &= expect(!track.contains("mpeg2tsMuxRate"), "unmodified-program: no mux rate");
         ok &= expect(!track.contains("mpeg2tsSiPids"), "unmodified-program: no SI PIDs");
     }
 
@@ -90,6 +90,8 @@ int main() {
         ok &= expect(track.value("mpeg2tsMode").toString() == "per-program", "per-program: mode");
         ok &= expect(track.value("mpeg2tsProgramNumber").toInt() == 1, "per-program: program number");
         ok &= expect(track.value("mpeg2tsSiPids").toArray().size() == 1, "per-program: SI PIDs");
+        ok &= expect(static_cast<qint64>(track.value("mpeg2tsMuxRate").toDouble()) == 8000000,
+                     "per-program: mux rate");
     }
 
     // initDataList follows the tracks array (MSF 5.1.7), and the document parses.
