@@ -1,12 +1,12 @@
 # moq2ts headless CLI (`moq2ts-cli`)
 
-`moq2ts-cli` is a headless MSFTS (MPEG-TS over MOQ) publisher. It reuses the same
+`moq2ts-cli` is a headless MSFTS (MPEG-TS over MOQT) publisher. It reuses the same
 streaming core as the GUI but runs under `QCoreApplication`, so it needs **no
 display server** and is intended for Linux/server deployment near an encoder.
 
 It reads a **seekable `.ts` file**, a **live stream** (named FIFO or
 `/dev/stdin`), or a **live SRT feed**, and publishes `draft-gregoire-moq-msfts`
-objects to a MOQ relay.
+objects to a MOQT relay.
 
 ## Build
 
@@ -47,9 +47,11 @@ cmake -S . -B build -DMOQXR_SOURCE_DIR=/path/to/moqxr
 cmake --build build -j
 ```
 
-One of `MOQXR_SDK_DIR`, `MOQXR_SOURCE_DIR` or `MOQ2TS_BUILD_WITH_MOCK_MOQXR=ON`
-must be given. Configuring with none of them fails with "moqxr publish headers not
-found", since there is no default location to fall back to.
+The real build needs moqxr v0.4.4 or newer and looks for a sibling `../moqxr`
+source checkout by default. Set
+`MOQXR_SDK_DIR` or `MOQXR_SOURCE_DIR` to use another location. If the selected
+moqxr headers are unavailable, configuration fails; a mock build must be
+requested explicitly with `MOQ2TS_BUILD_WITH_MOCK_MOQXR=ON`.
 
 Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 
@@ -57,8 +59,8 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--endpoint <url>` | `mock://local` | MOQ relay endpoint (must be `mock://...` in mock builds) |
-| `--namespace <ns>` | `live/ch1` | MOQ track namespace |
+| `--endpoint <url>` | `mock://local` | MOQT relay URL (`moqt://` or `https://`); `mock://...` selects local logging and is required in mock builds |
+| `--namespace <ns>` | `live/ch1` | MOQT track namespace |
 | `--video <path>` | - | TS/M2TS source: seekable file, FIFO, or `/dev/stdin` |
 | `--audio <path>` | - | Alternate single-stream TS source path |
 | `--srt-config <path>` | - | SRT ingest: JSON caller config (see below). Takes the place of `--video`, and implies `--unmodified` |
@@ -69,9 +71,9 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT). The SDT and the EIT keep the carried service only; the NIT, BAT, TDT, and TOT pass unchanged |
 | `--retain-null` | off | Per-program mode: also keep null (0x1FFF) packets |
 | `--mux-rate <bps>` | `0` | Advisory stuffing target for `per-program` carriage and a candidate for the MSF `bitrate` field. With 0, a per-program track of a single-program source without `--retain-null` measures the rate from the PCR when the source carries null packets, and a warning says when no rate is declared. MSFTS-02 forbids `mpeg2tsMuxRate` in both unmodified modes; an explicit value there produces a warning and is omitted from that field |
-| `--fragment-ms <ms>` | `250` | Group cadence |
+| `--fragment-ms <ms>` | `250` | Object media-duration hint and local mock pacing; RAPs determine media Group boundaries |
 | `--segment-bytes <n>` | `65536` | Target object size |
-| `--draft <n>` | `16` | MOQ draft version: 14, 16, 17 or 18. The relay must list it in `moqt_versions`; any other value is refused |
+| `--draft <n>` | `22` | MOQT transport draft version: 14, 16, 17, 18, 21, or 22. The relay must list it in `moqt_versions` |
 | `--paced` | off | File sources only: pace publishing at media rate instead of as fast as possible |
 | `--width/--height/--fps/--video-bitrate` | 1920/1080/30/2500 | Capture params |
 | `--sample-rate/--channels/--audio-bitrate/--audio-codec` | 48000/2/160/aac | Audio params |
@@ -160,8 +162,8 @@ ffmpeg -hide_banner -re \
 ```
 
 `-g 50` at 25 fps gives a random access point every 2 s. MSFTS-02 sets no
-maximum Group duration. To keep a byte-for-byte copy of what was sent, see the
-end-to-end test in [tests/srt-mpts-e2e.sh](../tests/srt-mpts-e2e.sh).
+maximum Group duration. To check received source packets against the sent feed,
+see the end-to-end test in [tests/srt-mpts-e2e.sh](../tests/srt-mpts-e2e.sh).
 
 A multi-program feed is published as one `unmodified-multiplex` track:
 
@@ -226,12 +228,77 @@ ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" \
         --unmodified --video /dev/stdin
 ```
 
+## Receive MPEG-TS from a relay
+
+Build the console receiver against an installed moq5 main build with the
+`service` and `mpeg2ts` targets enabled. The receiver has a standalone CMake
+project and does not need Qt:
+
+```bash
+cmake -S src/receive -B build-receiver -DCMAKE_PREFIX_PATH=/path/to/moq5/install
+cmake --build build-receiver -j
+ctest --test-dir build-receiver --output-on-failure
+```
+
+Pass the transport dependency paths used to build moq5 if its exported CMake
+package needs them. A moq5 build with picoquic WebTransport enabled may also
+need `-DMOQ_BUILD_ADAPTER_PICO_WT=ON`. The root build offers the same receiver
+target with `-DMOQ2TS_BUILD_RECEIVER=ON` when the publisher's dependencies are
+already available.
+
+```bash
+./build-receiver/moq2ts-receiver \
+  --url moqt://127.0.0.1:4433 --namespace live/ch1 \
+  --out capture.ts --stats-json receive-stats.json --insecure
+```
+
+`--insecure` is for local or test relays with an untrusted certificate. The
+following is a captured run against a local Red5 relay using a paced TS file:
+
+![Receiver terminal output showing draft 22 track selection, periodic MPEG-TS counters, and MoQT gap reports](receiver-cli.svg)
+
+The stats lines contain cumulative object, Group, byte, and TS packet counts;
+`rate` is the received bitrate since the previous line. `sync` counts bad TS
+sync bytes, `malformed` counts invalid packet structures, `tei` counts packets
+with the transport error indicator set, and `cc` counts per-PID continuity
+errors. `moqt_gaps` counts reported delivery gaps; `drops`, `parse_drops`, and
+`reorder_refused` are receiver delivery counters. The example received valid
+TS packets but reported five MoQT gaps. `--stats-json` writes the final counters
+when the receiver exits.
+
+The receiver negotiates draft 22 exactly, reads the MSF catalog, and selects
+the only compatible MPEG-TS track or the only unmodified multiplex when several
+program tracks exist. Use `--track NAME` to select a particular track. It writes
+188-byte TS or 192-byte M2TS source packets unchanged; `--out -` writes binary
+packets to stdout. `--duration SECONDS` stops a live capture, and `--fail-on-gap`
+returns failure when MOQT loss or packet validation errors are reported.
+`https://` URLs use WebTransport when the installed moq5 has that backend.
+
+The once-per-second readout includes checks corresponding to
+[ETSI TR 101 290 section 5.2](https://www.etsi.org/deliver/etsi_tr/101200_101299/101290/01.04.01_60/tr_101290v010401p.pdf);
+this is a subset of the standard's full monitoring checks.
+
+For a two-program SRT relay check with byte-level source comparison:
+
+```bash
+RELAY_URL=moqt://127.0.0.1:4433 \
+MOQ2TS_CLI=./build/moq2ts-cli \
+MOQ2TS_RECEIVER=./build-receiver/moq2ts-receiver \
+tests/srt-mpts-e2e.sh
+```
+
+The script reports any MOQT gaps; it requires real media, source-identical
+packets, and two decodable program entries. It leaves its capture and logs in
+the printed temporary directory.
+
 ## Verify byte-faithful passthrough
 
-For a file source with unmodified carriage the published payload must equal the input
-byte-for-byte. Under the mock build, the mock publisher logs objects to stderr;
-for a fidelity check, capture the emitted payloads and `cmp` against the source
-`.ts`. The catalog JSON should contain
+For a file source with unmodified carriage, the published payload should equal
+the input byte-for-byte. The mock publisher logs object metadata and byte counts,
+not payload bytes. Use the packetizer fidelity checks in
+[`m2ts_packetizer_test.cpp`](../tests/m2ts_packetizer_test.cpp) or the relay and
+receiver test in [`srt-mpts-e2e.sh`](../tests/srt-mpts-e2e.sh) to check the actual
+bytes. The catalog JSON should contain
 `"mpeg2tsMode":"unmodified-program"` when the source PAT lists one program,
 and `"mpeg2tsMode":"unmodified-multiplex"` otherwise. Neither contains
 `mpeg2tsSiPids`. Both carry the source PAT and PMT in a root `initDataList`:

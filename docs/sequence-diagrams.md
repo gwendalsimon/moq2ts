@@ -1,6 +1,6 @@
 # Sequence Diagrams — MOQ2TS Publisher
 
-## 1) Live publish startup and first fragments
+## 1) Live publish startup and first Objects
 
 ```mermaid
 sequenceDiagram
@@ -19,7 +19,7 @@ sequenceDiagram
     User->>UI: Click Start
     UI->>App: emit startRequested(config)
     App->>Pub: connect(config)
-    Pub-->>App: connectionStateChanged(connected=true)
+    Pub-->>App: connectionStateChanged(connected=true; configured)
     App->>Pipe: start(config, publisher)
     Pipe->>Pkt: open(programNumber)
     Pkt-->>Pipe: packetSize = 188 or 192
@@ -29,7 +29,7 @@ sequenceDiagram
     Pub-->>Pipe: nextObject() pull
     Pipe->>Pkt: readObject(packetsPerObject)
     Pkt-->>Pipe: whole source packets (M2tsObject)
-    Note over Pipe: interleave .timeline object at start and ~1/s
+    Note over Pipe: publish a cumulative .timeline Object per media Group
     Pipe-->>Pub: media or timeline object
     Pub-->>Pipe: framePublished(track, bytes, objects)
     Pipe-->>UI: stats(packets, bytes)
@@ -61,6 +61,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant UI as MainWindow
+    participant App as main.cpp
     participant Pipe as LivePipeline
     participant Pkt as M2tsPacketizer
     participant Pub as MoqxrPublisher
@@ -86,7 +87,7 @@ sequenceDiagram
     UI->>App: startRequested(https://relay.example/moq)
     App->>Pub: connect(config)
     Pub-->>UI: publishError("Mock publisher builds only accept mock:// endpoints")
-    App-->>UI: onPublishError("Could not open MOQ publish session")
+    App-->>UI: onPublishError("Could not open MOQT publish session")
 ```
 
 ## 3) Media track handling
@@ -104,7 +105,7 @@ sequenceDiagram
     Pipe-->>Pub: M2tsObject (or interleaved timeline object)
 ```
 
-## 4) Reconnect strategy (recommended extension point)
+## 4) Reconnect strategy (proposed extension)
 
 ```mermaid
 sequenceDiagram

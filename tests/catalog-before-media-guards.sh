@@ -45,14 +45,21 @@ if old_preannounce_condition in live_object_section:
 
 catalog_block = source.split('next->track_name == "catalog"', 1)[1].split("continue;", 1)[0]
 if "live_object_catalog_sent = true;" not in catalog_block:
-    raise SystemExit("catalog publish path must mark catalog as sent before media can drain")
+    # moqxr v0.4.4 retains the catalog and sends it from this helper, including
+    # on later draft-22 subscriptions. The helper sets the flag after serving.
+    helper = source.split("const auto send_retained_catalog =", 1)[1].split("const auto await_subscribe_deadline", 1)[0]
+    if "send_retained_catalog()" not in catalog_block or "live_object_catalog_sent = true;" not in helper:
+        raise SystemExit("catalog publish path must mark catalog as sent before media can drain")
 
 media_guard = "if (auto_forward_ && !live_object_catalog_sent)"
 if media_guard not in source:
     raise SystemExit("auto-forward live object publishing must wait for catalog before media")
 
 guard_index = source.index(media_guard)
-serve_index = source.index("sender_by_track[next->track_name].serve", guard_index)
+serve_call = "sender_by_track[next->track_name].serve"
+if serve_call not in source[guard_index:]:
+    serve_call = "status = sender.serve("
+serve_index = source.index(serve_call, guard_index)
 if guard_index > serve_index:
     raise SystemExit("catalog-before-media guard must run before serving media objects")
 PY

@@ -147,8 +147,8 @@ int main(int argc, char** argv) {
                        "uses this carriage by default.")));
     parser.addOption(QCommandLineOption(QStringLiteral("paced"),
         QStringLiteral("Pace file-source publishing at media-time rate (prevents dumping all data at wire speed).")));
-    addValue(QStringLiteral("draft"), QStringLiteral("MOQ draft version: 14, 16, 17 or 18. The relay must list it."),
-             QStringLiteral("version"), QStringLiteral("16"));
+    addValue(QStringLiteral("draft"), QStringLiteral("MOQT transport draft version: 14, 16, 17, 18, 21 or 22. The relay must list it."),
+             QStringLiteral("version"), QStringLiteral("22"));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-si"),
         QStringLiteral("Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT), with the SDT and EIT reduced to the carried service.")));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-null"),

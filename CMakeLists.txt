@@ -3,9 +3,10 @@ cmake_minimum_required(VERSION 3.24)
 project(moq2ts-ui
     VERSION 0.1.0
     DESCRIPTION "Cross-platform MOQ live publisher for H.264/AAC-Opus M2TS"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 option(MOQ2TS_BUILD_WITH_MOCK_MOQXR "Build without linking to a moqxr SDK and use the mock publisher adapter" OFF)
+option(MOQ2TS_BUILD_RECEIVER "Build the moq5 MPEG-TS receiver CLI" OFF)
 option(MOQ2TS_ENABLE_OPENH264 "Enable OpenH264 integration for H.264 encoding" ON)
 option(MOQ2TS_ENABLE_LIBAV_AUDIO "Enable libavcodec/libavformat integration" ON)
 option(MOQ2TS_ENABLE_LIBOPUS "Enable libopus fallback audio encoder path" ON)
@@ -392,10 +393,19 @@ install(TARGETS moq2ts-cli
     RUNTIME DESTINATION bin
 )
 
+if(MOQ2TS_BUILD_RECEIVER)
+    add_subdirectory(src/receive)
+endif()
 
-# Pure V4L2 mode-selection logic test (Linux only; no Qt/libav deps).
+# Publisher draft selection and Linux-only tests.
 if(UNIX AND NOT APPLE)
     enable_testing()
+    add_executable(moq2ts-moqt-draft-tests tests/moqt_draft_test.cpp)
+    target_include_directories(moq2ts-moqt-draft-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-moqt-draft-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-moqt-draft-tests COMMAND moq2ts-moqt-draft-tests)
+
+    # Pure V4L2 mode-selection logic test (no Qt/libav deps).
     add_executable(moq2ts-v4l2-selection-tests
         tests/v4l2_selection_test.cpp
         src/media/V4l2Capabilities.cpp

@@ -70,8 +70,8 @@ public:
     void stop() override;
     bool connected() const override;
 
-    // The MOQT drafts that --draft accepts: the ones every supported moqxr
-    // release can speak. A relay accepts only the drafts in its config, so an
+    // The MOQT drafts that --draft accepts with the pinned moqxr SDK.
+    // A relay accepts only the drafts in its config, so an
     // unsupported value is refused rather than replaced by another draft.
     static bool supportsDraft(int draft);
     static QString supportedDrafts();

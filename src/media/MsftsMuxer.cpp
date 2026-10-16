@@ -113,6 +113,7 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
             timelineTrack.insert(QStringLiteral("namespace"), catalog.namespaceName);
         }
         timelineTrack.insert(QStringLiteral("packaging"), QStringLiteral("mediatimeline"));
+        timelineTrack.insert(QStringLiteral("isLive"), catalog.isLive);
         QJsonArray depends;
         depends.append(catalog.track);
         timelineTrack.insert(QStringLiteral("depends"), depends);

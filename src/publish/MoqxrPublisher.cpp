@@ -79,14 +79,16 @@ std::vector<std::uint8_t> toVector(const QByteArray& bytes) {
     return std::vector<std::uint8_t>(begin, begin + bytes.size());
 }
 
-// --draft to the moqxr DraftVersion. Draft 17 and 18 are in every moqxr
-// release that has DraftVersion beyond 16; later drafts are not used here.
+// Map the user-selected transport draft to the moqxr API without silently
+// falling back to another version.
 std::optional<openmoq::publisher::DraftVersion> toDraftVersion(int draft) {
     switch (draft) {
     case 14: return openmoq::publisher::DraftVersion::kDraft14;
     case 16: return openmoq::publisher::DraftVersion::kDraft16;
     case 17: return openmoq::publisher::DraftVersion::kDraft17;
     case 18: return openmoq::publisher::DraftVersion::kDraft18;
+    case 21: return openmoq::publisher::DraftVersion::kDraft21;
+    case 22: return openmoq::publisher::DraftVersion::kDraft22;
     default: return std::nullopt;
     }
 }
@@ -387,11 +389,11 @@ bool MoqxrPublisher::connected() const {
 }
 
 bool MoqxrPublisher::supportsDraft(int draft) {
-    return draft == 14 || draft == 16 || draft == 17 || draft == 18;
+    return draft == 14 || draft == 16 || draft == 17 || draft == 18 || draft == 21 || draft == 22;
 }
 
 QString MoqxrPublisher::supportedDrafts() {
-    return QStringLiteral("14, 16, 17 or 18");
+    return QStringLiteral("14, 16, 17, 18, 21 or 22");
 }
 
 } // namespace moq2ts

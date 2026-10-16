@@ -120,6 +120,8 @@ int main() {
                                       .object().value(QStringLiteral("tracks")).toArray();
         const QJsonObject timeline = tracks.at(1).toObject();
         ok &= expect(timeline.value("packaging").toString() == "mediatimeline", "timeline: packaging");
+        ok &= expect(timeline.value("isLive").toBool(), "timeline: required isLive for live catalog");
+        ok &= expect(!timeline.contains("namespace"), "timeline: inherit catalog namespace");
         ok &= expect(!timeline.contains("type"), "timeline: no type field");
         ok &= expect(timeline.value("depends").toArray().at(0).toString() == "program-1", "timeline: depends");
     }

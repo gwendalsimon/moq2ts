@@ -1,4 +1,4 @@
-# Developer Guide — MOQ2TS Publisher
+# Developer Guide — MOQ2TS Publisher and Receiver
 
 ## Purpose
 
@@ -13,7 +13,9 @@ media publishing. It currently provides:
 6. In-process camera/microphone capture through libavdevice/libavformat
 7. Preview tab for selected camera/microphone video and audio level verification
 8. MSF timeline side-track publication for wall-clock correlation
-9. Publication through an adapter that defaults to a deterministic mock path
+9. Publication through moqxr, with an explicit local `mock://` path for testing
+10. A standalone moq5 receiver for draft-22 MSF MPEG-TS tracks, with source
+    packet output and live transport counters
 
 ## Runtime flow
 
@@ -36,7 +38,7 @@ media publishing. It currently provides:
   validates sync bytes.
 - `LibavCaptureSource` opens selected devices through libavdevice, transcodes
   to H.264 plus AAC/Opus, muxes MPEG-TS into an in-memory AVIO sink, extracts
-  PAT/PMT as `initData`, and emits 188-byte TS packet objects.
+  PAT/PMT for a root `initDataList` entry, and emits 188-byte TS packet objects.
 - On Linux/V4L2, `LibavCaptureSource` probes the selected camera's device nodes
   (`V4l2Capabilities`) and prefers an MJPEG mode that meets the requested
   width/height/fps, opening it with `input_format=mjpeg`; it falls back to raw
@@ -56,9 +58,11 @@ media publishing. It currently provides:
   muxer interleaver is flushed at each IDR so the byte offset is the exact start
   of the keyframe's TS packets, making each MOQT group start on a random-access
   point. The GOP is bounded by `keyframeIntervalMs` so IDRs recur periodically.
-- `M2tsPacketizer` scans PAT/PMT, selects one program, and filters media
-  objects to PAT, selected PMT, selected PCR PID, and that program's elementary
-  PIDs. Packets from other programs and null packets are not published.
+- In `per-program` mode, `M2tsPacketizer` scans PAT/PMT, selects one program,
+  and filters media objects to a rewritten PAT, selected PMT, selected PCR PID,
+  and that program's elementary PIDs. Other programs and null packets are
+  dropped unless optional retention applies. In an unmodified mode, it forwards
+  all source packets unchanged.
 - `MsftsMuxer` builds the MSF catalog: an `mpeg2ts` media track plus an
   optional media-timeline side-track. The media track carries MSF common
   fields (`isLive`, `role`, `mimeType`, `targetLatency` when live, optional
@@ -95,7 +99,8 @@ media publishing. It currently provides:
   - Detects TS/M2TS packet size.
   - Emits object payloads made only from whole source packets.
   - Scans the initial packet window for PAT and PMT packets, preserves those
-    packets in source-packet form, and exposes them for catalog `initData`.
+    packets in source-packet form, and exposes them for the catalog's root
+    `initDataList` entry.
   - Filters MPTS inputs down to the selected program's PSI/PCR/elementary PIDs
     before objectization, with a PAT rewritten to list that program only.
   - Keeps the conditional access packets of the selected program: the ECM
@@ -146,8 +151,8 @@ media publishing. It currently provides:
 
 - `src/publish/MoqxrPublisher.*`
   - Provides `IMoqOutput` interface.
-  - Mock implementation logs payload sends.
-  - `MOQ2TS_HAS_MOQXR` compile section is the hook for real SDK wiring.
+  - Real builds call the moqxr SDK; the `mock://` path logs catalog and object
+    metadata without sending payloads to a relay.
 
 - `CMakeLists.txt`
   - UI + dependencies + optional feature toggles.
@@ -156,7 +161,8 @@ media publishing. It currently provides:
 
 | Feature        | Toggle | Required to enable | Code path |
 |----------------|--------|-------------------|----------|
-| Mock publisher | `MOQ2TS_BUILD_WITH_MOCK_MOQXR` | none | default ON |
+| Mock publisher | `MOQ2TS_BUILD_WITH_MOCK_MOQXR` | none | explicit ON; default OFF |
+| MOQT publisher | `MOQXR_SOURCE_DIR` or `MOQXR_SDK_DIR` | moqxr source or SDK | default real build; sibling `../moqxr` source is the default location |
 | Device listing | auto-detected | libavdevice/platform APIs or Qt Multimedia fallback | UI enumeration only |
 | Device capture | auto-detected | libavdevice/libswscale/libswresample | camera/mic to MPEG-TS |
 | OpenH264 path  | `MOQ2TS_ENABLE_OPENH264`     | libopenh264          | encoder integration |
@@ -165,25 +171,22 @@ media publishing. It currently provides:
 
 ### Bookworm build modes
 
-The Bookworm script defaults to mock publisher mode:
+The Bookworm script defaults to a real moqxr build using the sibling
+`../moqxr` checkout:
 
 ```bash
 ./scripts/build-debian-bookworm.sh
 ```
 
-Mock publisher mode is for local pipeline testing and only accepts endpoints
-starting with `mock://`, such as `mock://local`. A real relay URL in a mock build
-is rejected with an explicit error.
-
-To publish to a real relay, build against the sibling `../moqxr` checkout:
+For local pipeline testing without a relay, request mock mode explicitly:
 
 ```bash
-MOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF ./scripts/build-debian-bookworm.sh
+MOQ2TS_BUILD_WITH_MOCK_MOQXR=ON ./scripts/build-debian-bookworm.sh
 ```
 
-The script runs the container as the current user and mounts `../moqxr` read-only
-when the sibling checkout exists. Build output should remain owned by the current
-user under `build-bookworm`.
+The mock build accepts only `mock://` endpoints. The script runs the container
+as the current user and mounts `../moqxr` read-only when that checkout exists.
+Build output remains under `build-bookworm`.
 
 ## Integrating the real moqxr API
 
@@ -206,10 +209,10 @@ Suggested mapping:
   teardown is bounded, so pressing Stop never freezes the UI. (Implemented in
   the sibling `../moqxr` `MoqtSession` plus `LivePipeline`/`main.cpp` here.)
 
-The real-linked path is compiled only when `MOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF`.
-With the default mock build, `MoqxrPublisher::connect()` accepts only
-`mock://...` endpoints. This avoids confusing real relay URLs with successful
-local mock sessions.
+The real-linked path is the default build. The UI and CLI still start with
+`mock://local`; enter a `moqt://` or `https://` relay URL to publish over MOQT.
+In an explicit mock build, `MoqxrPublisher::connect()` accepts only
+`mock://...` endpoints.
 
 ## Draft MSFTS conformance notes
 
@@ -217,14 +220,15 @@ The media Object payload is only consecutive source packets. Do not prepend
 private headers. Object payload length must be a multiple of
 `mpeg2tsPacketSize`.
 
-`initData` is Base64 of whole source packets. For 188-byte TS this means PAT
+The root `initDataList` entry holds Base64 of whole source packets, referenced
+from the media track by `initRef`. For 188-byte TS this means PAT
 and PMT packets beginning with sync byte `0x47`; for 192-byte M2TS this means
 the four-byte timestamp prefix is retained and sync byte `0x47` remains at
 offset 4.
 
-For an MPTS input, `mpeg2tsProgramNumber` identifies the selected program. The
-published media track is program-filtered; it is not a raw pass-through of every
-PID in the source multiplex.
+For a `per-program` MPTS input, `mpeg2tsProgramNumber` identifies the selected
+program and the media track is filtered. An `unmodified-multiplex` track forwards
+all source packets and names a reference program only when one is selected.
 
 ## Catalog shape
 
@@ -353,15 +357,13 @@ until MSF defines how to trim it (moq-wg/msf#205).
 - Normal speech should move the audio meters. The UI maps normalized RMS to a
   `-60 dBFS` to `0 dBFS` display range instead of showing raw linear samples.
 
-## Known limitations in this scaffold
+## Known limitations
 
 - Audio/video synchronization is intentionally simplified.
 - Capture device naming is platform-specific. Linux uses `v4l2` for camera IDs
   and PulseAudio device names for microphones; Windows uses DirectShow-style
   names; macOS uses AVFoundation names.
-- The sample MSFTS frameizer is draft-oriented and not the authoritative final
-  wire format.
-- Program filtering preserves source PAT/PMT packet bytes in `initData`; it does
-  not rewrite PAT sections to remove other program entries yet.
-- No retransmission/back-pressure strategy is included yet.
+- MOQT transport drafts 14, 16, 17, 18, 21, and 22 are supported by the
+  adapter when linked with moqxr v0.4.4 or newer. New sessions default to 22;
+  the relay must accept the selected version.
 - No auth/token refresh path is implemented in the publisher adapter.
