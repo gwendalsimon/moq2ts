@@ -347,6 +347,33 @@ int main(int argc, char** argv) {
     QObject::connect(&publisher, &moq2ts::MoqxrPublisher::connectionStateChanged, &app,
                      [](bool, const QString& m) { logLine(stderr, "conn", m); });
 
+    // The latest totals, kept for the line printed at exit: the periodic line below
+    // is throttled and comes before the last Group goes out. The pipeline counts
+    // the media Objects it hands over; the publisher counts what the library sent
+    // (those plus the catalog and timeline Objects). Both are written from the
+    // worker threads, so these connections are direct.
+    struct Totals {
+        std::atomic<int64_t> objects{0};
+        std::atomic<int64_t> bytes{0};
+        std::atomic<int64_t> groups{0};
+        std::atomic<int64_t> sentObjects{0};
+        std::atomic<int64_t> sentBytes{0};
+    };
+    auto totals = std::make_shared<Totals>();
+    QObject::connect(&publisher, &moq2ts::MoqxrPublisher::framePublished, &app,
+                     [totals](const QString&, int64_t bytes, int64_t objects) {
+                         totals->sentBytes.store(bytes, std::memory_order_relaxed);
+                         totals->sentObjects.store(objects, std::memory_order_relaxed);
+                     },
+                     Qt::DirectConnection);
+    QObject::connect(&pipeline, &moq2ts::LivePipeline::stats, &app,
+                     [totals](int64_t objects, int64_t bytes, int64_t groups) {
+                         totals->objects.store(objects, std::memory_order_relaxed);
+                         totals->bytes.store(bytes, std::memory_order_relaxed);
+                         totals->groups.store(groups, std::memory_order_relaxed);
+                     },
+                     Qt::DirectConnection);
+
     // Throttle stats to roughly one line per second to keep server logs readable.
     auto* statsClock = new QElapsedTimer();
     statsClock->start();
@@ -409,6 +436,13 @@ int main(int argc, char** argv) {
         // srt_cleanup() itself is left to srtGuard, which runs on every exit path.
 #endif  // MOQ2TS_HAS_SRT
         pipeline.waitForStopped(); // bounded (3s) + detach fallback
+        std::fprintf(stdout, "[final] objects=%lld bytes=%lld groups=%lld sent_objects=%lld sent_bytes=%lld\n",
+                     static_cast<long long>(totals->objects.load(std::memory_order_relaxed)),
+                     static_cast<long long>(totals->bytes.load(std::memory_order_relaxed)),
+                     static_cast<long long>(totals->groups.load(std::memory_order_relaxed)),
+                     static_cast<long long>(totals->sentObjects.load(std::memory_order_relaxed)),
+                     static_cast<long long>(totals->sentBytes.load(std::memory_order_relaxed)));
+        std::fflush(stdout);
     });
 
     const int rc = app.exec();

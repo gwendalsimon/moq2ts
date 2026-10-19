@@ -25,7 +25,6 @@ struct PublishedObject {
     QString trackName;
     QByteArray payload;
     std::uint64_t groupId = 0;
-    std::uint64_t subgroupId = 0;
     std::uint64_t objectId = 0;
     std::uint64_t mediaTimeUs = 0;
     std::uint64_t mediaDurationUs = 0;

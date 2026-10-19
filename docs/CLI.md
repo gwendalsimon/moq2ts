@@ -179,11 +179,12 @@ A multi-program feed is published as one `unmodified-multiplex` track:
 The track ends because the draft forbids `unmodified-multiplex` for a
 one-program PAT and requires a new track for a new program number. The
 initialization data carries the PMT of the reference program (draft "Use of MSF
-Initialization Data"). Without `--program` that is the first program in the
-PAT, on whose PCR a subscriber then paces the multiplex (draft "Unmodified
-Multiplex"); when that program leaves the PAT, the next first program takes
-over and a new catalog carries its PMT. The initialization data is declared
-only when that PMT arrived at the start; it is never added later.
+Initialization Data"). The draft does not say which PMT a multiplex without a
+reference program carries. Without `--program`, moq2ts carries the PMT of the
+first program in the PAT, as an implementation choice. When that program leaves
+the PAT, the next first program takes over and a new catalog carries its PMT.
+The initialization data is declared only when that PMT arrived at the start; it
+is never added later.
 
 The SRT receive buffer holds about 5 s. While nothing reads it, for example
 while the publisher waits for its first subscriber, it keeps the newest media
@@ -303,8 +304,8 @@ bytes. The catalog JSON should contain
 and `"mpeg2tsMode":"unmodified-multiplex"` otherwise. Neither contains
 `mpeg2tsSiPids`. Both carry the source PAT and PMT in a root `initDataList`:
 the one PMT of an `unmodified-program`, and for an `unmodified-multiplex` the
-PMT of its reference program: the one `--program` names, or the first program
-in the PAT without it.
+PMT of the program `--program` names or, without it, the PMT of the first
+program in the PAT (a moq2ts choice).
 An `unmodified-multiplex` catalog names its reference program in
 `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` only with `--program`. Neither
 unmodified mode contains `mpeg2tsMuxRate`.
