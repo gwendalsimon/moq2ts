@@ -465,8 +465,8 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     m_rapPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
     // An unmodified track carries its source PAT and PMT as initData, so a
     // joining subscriber can pass them to the receiver before the first Object
-    // (draft "Use of MSF Initialization Data"). A multiplex carries the PMT of
-    // its reference program: the first program of the PAT when it names none.
+    // (draft "Use of MSF Initialization Data"). refreshInitData() says which
+    // PMT a multiplex carries.
     if (m_transparent) {
         refreshInitData();
     }
@@ -876,9 +876,10 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
 void M2tsPacketizer::refreshInitData() {
     // initData is the PAT and the PMT that the track carries: the rewritten PAT
     // in per-program carriage, the source PAT in the unmodified modes. A
-    // multiplex carries the PMT of its reference program, or of every program
-    // when it names none. While a PMT has not arrived yet, the tables do not
-    // match, so initData waits for it.
+    // multiplex carries the PMT of its reference program. The draft does not
+    // say which PMT a multiplex without one carries, and moq2ts carries the PMT
+    // of the first program of the PAT. While a PMT has not arrived yet, the
+    // tables do not match, so initData waits for it.
     if (m_pat.bytes.isEmpty()) {
         return;
     }

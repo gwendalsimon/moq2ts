@@ -276,12 +276,12 @@ program. It then carries `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` like a
 With `--program N` it is named `mux-1-pN`, and its `mpeg2tsProgramNumber` and
 `mpeg2tsPcrPid` name N as the reference program, on whose PCR a subscriber
 paces the multiplex. Without `--program` the catalog names no program. The
-initialization data is the source PAT with the PMT of the reference program,
-which is the first program in the PAT without `--program` (draft "Use of MSF
-Initialization Data" and "Unmodified Multiplex"). Neither unmodified mode
-carries `mpeg2tsMuxRate`; the multiplex also omits `mpeg2tsSiPids`. The track
-ends when the PAT lists one program, or when the
-reference program leaves it.
+initialization data is the source PAT with the PMT of the reference program
+(draft "Use of MSF Initialization Data"). The draft does not say which PMT a
+multiplex without one carries. moq2ts carries the PMT of the first program in
+the PAT. Neither unmodified mode carries `mpeg2tsMuxRate`; the multiplex also
+omits `mpeg2tsSiPids`. The track ends when the PAT lists one program, or when
+the reference program leaves it.
 
 Field presence is conditional:
 
