@@ -170,9 +170,8 @@ jobs:
 
   windows:
     name: windows (x86_64)
-    # The moqxr SDK is built on windows-latest and its static libraries need that
-    # image's MSVC STL (std::_Find_not_ch_vectorized and friends), which the
-    # VS 2022 toolset of windows-2022 does not provide.
+    # The image moqxr releases its SDK on: its static libraries call MSVC STL
+    # helpers that an older toolset cannot link.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
