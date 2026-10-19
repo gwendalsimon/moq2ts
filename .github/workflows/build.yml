@@ -170,7 +170,10 @@ jobs:
 
   windows:
     name: windows (x86_64)
-    runs-on: windows-2022
+    # The moqxr SDK is built on windows-latest and its static libraries need that
+    # image's MSVC STL (std::_Find_not_ch_vectorized and friends), which the
+    # VS 2022 toolset of windows-2022 does not provide.
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -212,7 +215,7 @@ jobs:
         shell: pwsh
         run: |
           $env:PKG_CONFIG_PATH = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib\pkgconfig"
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+          cmake -S . -B build -A x64 `
             -DMOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF `
             -DMOQXR_SDK_DIR="$env:MOQXR_SDK_DIR" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
