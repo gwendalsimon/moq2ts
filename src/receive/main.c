@@ -230,6 +230,9 @@ int main(int argc, char **argv) {
     receiver_ts_stats_init(&ts);
     uint64_t objects = 0, bytes = 0, groups = 0, prev_bytes = 0;
     uint64_t last_group = 0;
+    uint64_t last_object = 0;
+    uint64_t duplicates = 0;
+    uint64_t missing_objects = 0;
     double start = monotonic_seconds(), last_report = start;
 
     while (!stopping && !fatal && !ended) {
@@ -286,7 +289,26 @@ int main(int argc, char **argv) {
         if (fatal || ended) break;
         moq_media_object_t obj;
         while (moq_media_receiver_poll_object(rx, &obj, sizeof(obj)) == MOQ_OK) {
-            if (selected && obj.track == selected->handle && obj.status == MOQ_OBJECT_NORMAL) {
+            bool duplicate = false;
+            if (selected && obj.track == selected->handle && obj.status == MOQ_OBJECT_NORMAL && objects > 0) {
+                /* An object at or before the last one written was already
+                 * delivered (the same group and object again). It is not
+                 * written, so the output stays the source and the continuity
+                 * counters do not count the repeat as errors. */
+                duplicate = obj.group_id < last_group ||
+                            (obj.group_id == last_group && obj.object_id <= last_object);
+                if (duplicate) {
+                    duplicates++;
+                    fprintf(stderr, "[rx] duplicate object group=%llu object=%llu dropped\n",
+                            (unsigned long long)obj.group_id, (unsigned long long)obj.object_id);
+                }
+            }
+            if (selected && obj.track == selected->handle && obj.status == MOQ_OBJECT_NORMAL && !duplicate) {
+                /* A gap is a missing object: the next group, or the next object
+                 * of the group, is not the one that follows the last. */
+                bool missing = objects > 0 &&
+                               (obj.group_id == last_group ? obj.object_id != last_object + 1
+                                                           : obj.group_id != last_group + 1 || obj.object_id != 0);
                 uint32_t size = selected->ts->packet_size;
                 bool valid = obj.payload.len > 0 && obj.payload.len % size == 0;
                 for (size_t pos = 0; valid && pos < obj.payload.len; pos += size)
@@ -304,10 +326,13 @@ int main(int argc, char **argv) {
                         groups++;
                         last_group = obj.group_id;
                     }
-                    if (obj.has_loss_report && obj.gap)
+                    last_object = obj.object_id;
+                    if (missing) {
+                        missing_objects++;
                         fprintf(stderr, "[rx] MOQT gap before group=%llu object=%llu\n",
                                 (unsigned long long)obj.group_id,
                                 (unsigned long long)obj.object_id);
+                    }
                 }
             }
             moq_media_object_cleanup(&obj);
@@ -349,7 +374,7 @@ int main(int argc, char **argv) {
     }
     if (selected) readout(selected, objects, bytes, groups, &ts, &stats,
                           monotonic_seconds() - last_report, prev_bytes);
-    if (opt.fail_on_gap && (stats.gaps_reported || stats.objects_dropped ||
+    if (opt.fail_on_gap && (missing_objects || duplicates || stats.gaps_reported || stats.objects_dropped ||
                             stats.parse_drops || stats.reorder_refused ||
                             ts.sync_errors || ts.malformed_packets ||
                             ts.transport_errors ||

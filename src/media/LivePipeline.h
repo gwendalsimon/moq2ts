@@ -1,5 +1,6 @@
 #pragma once
 
+#include "media/EgressPacing.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -37,6 +38,10 @@ struct PublishState {
     QByteArray timelineRecords;
     std::optional<std::uint64_t> timelineGroupId;
     std::int64_t pacingStartUs = -1;
+    // --paced follows the PCR of the source once it has shown one; before that
+    // (or without one) it falls back to fragment-duration steps.
+    PcrClock pcrClock;
+    bool pacingOnPcr = false;
     // Objects to return before reading the next one, in order.
     std::deque<PublishedObject> pending;
     // The catalog as published, and the group of its last catalog object.

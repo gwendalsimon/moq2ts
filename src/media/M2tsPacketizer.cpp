@@ -1157,6 +1157,15 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     object->ptsUs.reset();
     const int ps = m_packetSize;
     const int tsOffset = ps == 192 ? 4 : 0;
+    object->pcr27 = -1;
+    if (m_pcrPid >= 0) {
+        for (qsizetype offset = 0; offset + ps <= payload.size() && object->pcr27 < 0; offset += ps) {
+            const QByteArray tsView = QByteArray::fromRawData(payload.constData() + offset + tsOffset, 188);
+            if (pidOf(tsView) == m_pcrPid) {
+                object->pcr27 = pcrOf(tsView);
+            }
+        }
+    }
     const int ptsPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
     for (qsizetype offset = 0; offset + ps <= payload.size(); offset += ps) {
         if (rapDetected && (object->ptsUs.has_value() || ptsPid < 0)) {

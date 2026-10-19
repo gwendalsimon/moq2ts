@@ -33,4 +33,13 @@ grep -q 'std::condition_variable m_doneCv' "$PIPELINE_HDR" \
 grep -q 'shutdownFuture.wait_for(std::chrono::seconds(3))' "$MAIN" \
   || fail "aboutToQuit must bound the shutdown future wait"
 
+# B4: one thread disconnects a Publisher. stop() takes it from m_activePublisher,
+# and the pipeline thread disconnects only when it still owns it.
+PUBLISHER_CPP="$REPO_ROOT/src/publish/MoqxrPublisher.cpp"
+grep -q 'publisherToStop = std::move(m_activePublisher);' "$PUBLISHER_CPP" \
+  || fail "stop() must take the active publisher so it is disconnected once"
+
+grep -q 'ownsDisconnect' "$PUBLISHER_CPP" \
+  || fail "the publish thread must disconnect only a publisher that stop() did not take"
+
 printf 'stop-shutdown guards passed\n'

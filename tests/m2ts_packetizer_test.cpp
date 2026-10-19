@@ -1056,6 +1056,61 @@ int main() {
         ok &= expect(!changed, "multiplex: initData missing at open is not added later");
     }
 
+    // Each Object reports the first PCR of the program's PCR PID (PID 0x100), or
+    // -1, which is what --paced releases the Object by.
+    {
+        constexpr std::int64_t first = 27000000 * 5 + 123;      // not a multiple of 300
+        constexpr std::int64_t second = first + 27000000 / 4;
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0x00)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}})) +
+                        tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        // PCR on another PID: not the program's clock.
+        const QByteArray other = pcrPacket(0x101, 999999999, 0);
+        ts += video + video + other + video;
+        ts += pcrPacket(0x100, first, 0) + video + video + video;
+        ts += video + video + video + video;
+        ts += pcrPacket(0x100, second, 1) + video + video + video;
+        const QString path = dir.filePath("pcr.ts");
+        ok &= expect(writeFile(path, ts), "write PCR stream");
+
+        M2tsPacketizer packetizer(path);
+        QString error;
+        ok &= expect(packetizer.open(0, &error), "PCR stream opens: " + error.toStdString());
+        QList<std::int64_t> pcrs;
+        M2tsObject object;
+        while (packetizer.readObject(4, &object, &error)) {
+            pcrs.append(object.pcr27);
+        }
+        // PAT, PMT, video, video | other-PID PCR, video, first, video | video x4 |
+        // video, video, second, video | video x2 (rest)
+        std::int64_t seen = 0;
+        QList<std::int64_t> found;
+        for (const std::int64_t value : pcrs) {
+            if (value >= 0) {
+                found.append(value);
+            }
+            seen += 1;
+        }
+        ok &= expect(found == QList<std::int64_t>({first, second}),
+                     "PCR: the PCR PID's PCRs are reported, in order, to the nearest 27 MHz tick");
+        ok &= expect(pcrs.size() == seen && pcrs.first() == -1, "PCR: an Object without one reports -1");
+
+        // One Object holding both: the first.
+        M2tsPacketizer whole(path);
+        ok &= expect(whole.open(0, &error), "PCR stream opens again");
+        ok &= expect(whole.readObject(64, &object, &error) && object.pcr27 == first,
+                     "PCR: an Object with two reports the first");
+        // A PCR on another PID alone does not count.
+        const QString otherPath = dir.filePath("pcr-other.ts");
+        ok &= expect(writeFile(otherPath, tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}})) +
+                                              tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video +
+                                              other + video),
+                     "write other-PID PCR stream");
+        M2tsPacketizer ignored(otherPath);
+        ok &= expect(ignored.open(0, &error) && ignored.readObject(64, &object, &error) && object.pcr27 == -1,
+                     "PCR: a PCR on another PID is not the clock");
+    }
+
     if (ok) {
         std::cout << "m2ts packetizer tests passed\n";
     }

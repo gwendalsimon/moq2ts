@@ -472,12 +472,21 @@ void LivePipeline::runLoop() {
         // Pace file-source publishing at media-time rate so data isn't dumped
         // at wire speed before subscribers can connect.
         if (m_config.pacedFileSource) {
+            // The release time follows the source's own clock (PCR), so a
+            // source is played out at its rate whatever the Object size. An
+            // Object without a PCR waits for the media time of the last one.
+            const std::int64_t pcrMediaUs = st->pcrClock.update(object.pcr27);
+            const bool onPcr = pcrMediaUs >= 0;
+            if (onPcr != st->pacingOnPcr) {
+                st->pacingOnPcr = onPcr;
+                st->pacingStartUs = -1;
+            }
+            const std::int64_t paceUs = onPcr ? pcrMediaUs : static_cast<std::int64_t>(published.mediaTimeUs);
             if (st->pacingStartUs < 0) {
-                st->pacingStartUs = nowSteadyUs() - static_cast<std::int64_t>(published.mediaTimeUs);
+                st->pacingStartUs = nowSteadyUs() - paceUs;
             }
             while (m_running.load(std::memory_order_acquire)) {
-                const std::int64_t delay = paceDelayUs(static_cast<std::int64_t>(published.mediaTimeUs),
-                                                       nowSteadyUs() - st->pacingStartUs, kPaceSlackUs);
+                const std::int64_t delay = paceDelayUs(paceUs, nowSteadyUs() - st->pacingStartUs, kPaceSlackUs);
                 if (delay <= 0) {
                     break;
                 }

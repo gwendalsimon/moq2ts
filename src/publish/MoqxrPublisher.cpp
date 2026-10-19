@@ -290,23 +290,26 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             }
             return false;
         }
-        const auto disconnectStatus = activePublisher->disconnect(0);
-        if (!disconnectStatus.ok) {
-            emit publishError(QString::fromStdString(disconnectStatus.message));
-            QMutexLocker locker(&m_mutex);
-            if (m_activePublisher == activePublisher) {
-                m_activePublisher.reset();
-            }
-            return false;
-        }
-
-        const auto stats = activePublisher->stats();
+        // Only one thread disconnects a Publisher. stop() takes m_activePublisher
+        // first when it interrupts a publish; the disconnect here is for the
+        // stream that ended on its own.
+        bool ownsDisconnect = false;
         {
             QMutexLocker locker(&m_mutex);
             if (m_activePublisher == activePublisher) {
                 m_activePublisher.reset();
+                ownsDisconnect = true;
             }
         }
+        if (ownsDisconnect) {
+            const auto disconnectStatus = activePublisher->disconnect(0);
+            if (!disconnectStatus.ok) {
+                emit publishError(QString::fromStdString(disconnectStatus.message));
+                return false;
+            }
+        }
+
+        const auto stats = activePublisher->stats();
         emit framePublished(mediaTrackName, static_cast<int64_t>(stats.bytes_published), static_cast<int64_t>(stats.objects_published));
         return status.ok;
     } catch (const std::exception& error) {
@@ -369,7 +372,10 @@ void MoqxrPublisher::stop() {
         }
         m_connected = false;
 #ifdef MOQ2TS_HAS_MOQXR
-        publisherToStop = m_activePublisher;
+        // stop() takes the publisher: the pipeline thread, which sees it gone,
+        // then does not disconnect it a second time while this one still does.
+        publisherToStop = std::move(m_activePublisher);
+        m_activePublisher.reset();
 #endif
     }
 #ifdef MOQ2TS_HAS_MOQXR

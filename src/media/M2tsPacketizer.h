@@ -33,6 +33,9 @@ struct M2tsObject {
     // microseconds, unwrapped past the 33-bit range. Empty when no video PES
     // starts in it.
     std::optional<std::uint64_t> ptsUs;
+    // First PCR of the program's PCR PID in this object, in 27 MHz units, or -1.
+    // It wraps; PcrClock turns a series of them into media time.
+    std::int64_t pcr27 = -1;
 };
 
 // MPEG-2 CRC_32 (ISO/IEC 13818-1 Annex A) of size octets.
