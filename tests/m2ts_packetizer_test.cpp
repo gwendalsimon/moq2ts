@@ -940,8 +940,8 @@ int main() {
     // Unmodified multiplex (draft "Unmodified Multiplex", "Use of MSF
     // Initialization Data"): every source packet goes out unchanged, a
     // reference program is named only on request, and initData carries the PAT
-    // with the PMT of the reference program: the first program in the PAT when
-    // none is named.
+    // with the PMT of the reference program, or of the first program in the PAT
+    // (a moq2ts choice) when none is named.
     {
         const QByteArray mux = stream({{1, 0x1000}, {2, 0x1001}});
         const QString path = dir.filePath("mux.ts");
