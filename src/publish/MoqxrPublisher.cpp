@@ -263,12 +263,16 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             return openmoq::publisher::LiveObject{
                 .track_name = current.trackName.toStdString(),
                 .group_id = static_cast<std::size_t>(current.groupId),
-                .subgroup_id = current.subgroupId,
+                // One subgroup per Group: see subgroup_contains_group_largest.
+                .subgroup_id = 0,
                 .object_id = static_cast<std::size_t>(current.objectId),
                 .media_time_us = current.mediaTimeUs,
                 .media_duration_us = current.mediaDurationUs,
                 .payload = toVector(current.payload),
-                .subgroup_contains_group_largest = isFinalInGroup,
+                // One subgroup per Group, so it holds the Group's largest
+                // Object. moqxr writes the flag into the subgroup header from
+                // the first Object, and the subgroup FIN then ends the Group.
+                .subgroup_contains_group_largest = true,
                 .final_in_subgroup = isFinalInGroup,
             };
         };
