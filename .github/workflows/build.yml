@@ -167,7 +167,9 @@ jobs:
 
   windows:
     name: windows (x86_64)
-    runs-on: windows-2022
+    # The image moqxr releases its SDK on: its static libraries call MSVC STL
+    # helpers that an older toolset cannot link.
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -209,7 +211,7 @@ jobs:
         shell: pwsh
         run: |
           $env:PKG_CONFIG_PATH = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib\pkgconfig"
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+          cmake -S . -B build -A x64 `
             -DMOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF `
             -DMOQXR_SDK_DIR="$env:MOQXR_SDK_DIR" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
