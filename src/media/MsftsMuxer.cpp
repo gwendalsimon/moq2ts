@@ -154,6 +154,18 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     return json;
 }
 
+QByteArray MsftsMuxer::completeCatalogJson(const MsftsCatalog& catalog) {
+    QJsonObject root;
+    root.insert(QStringLiteral("version"), catalog.msfVersion);
+    if (catalog.generatedAtMs > 0) {
+        root.insert(QStringLiteral("generatedAt"), catalog.generatedAtMs);
+    }
+    // MSF 5.1.3: a commitment that no track and no content will follow.
+    root.insert(QStringLiteral("isComplete"), true);
+    root.insert(QStringLiteral("tracks"), QJsonArray());
+    return QJsonDocument(root).toJson(QJsonDocument::Compact);
+}
+
 QByteArray MsftsMuxer::mediaTimelineRecord(std::uint64_t mediaTimeUs,
                                            std::uint64_t groupId,
                                            std::uint64_t objectId,
