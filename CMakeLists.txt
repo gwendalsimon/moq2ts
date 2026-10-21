@@ -213,6 +213,7 @@ set(CORE_HEADERS
     src/media/V4l2Capabilities.h
     src/media/LibavPreviewWorker.h
     src/media/M2tsPacketizer.h
+    src/media/SiTables.h
     src/media/MsftsMuxer.h
     src/publish/MoqxrPublisher.h
 )

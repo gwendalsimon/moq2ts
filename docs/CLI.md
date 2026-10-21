@@ -69,6 +69,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--unmodified` | off | Unmodified carriage: forward every source packet unchanged (no PID filter or rewrite). The catalog carries the source PAT and PMT as initialization data. The track is `unmodified-program` for a single-program source and `unmodified-multiplex` otherwise; without a PAT the track is refused |
 | `--transparent`, `--publish-multiplex` | off | Aliases of `--unmodified`; `--transparent` is kept for existing scripts |
 | `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT). The SDT and the EIT keep the carried service only; the NIT, BAT, TDT, and TOT pass unchanged |
+| `--si <list>` | none | Per-program mode: keep the listed DVB SI tables, a comma-separated list of `nit`, `sdt`, `bat`, `eit-pf`, `eit-schedule`, `tdt-tot`, or `all`. The PIDs are 0x0010 (NIT), 0x0011 (SDT and BAT), 0x0012 (EIT), and 0x0014 (TDT and TOT); the catalog lists them in `mpeg2tsSiPids`. When only one of SDT and BAT (or of `eit-pf` and `eit-schedule`) is listed, the PID is kept and the sections of the other table are dropped. The SDT and the EIT keep the carried service only. Combining `--si` with `--retain-si` is an error; `--retain-si` is the same as `--si all` |
 | `--retain-null` | off | Per-program mode: also keep null (0x1FFF) packets |
 | `--mux-rate <bps>` | `0` | Advisory stuffing target for `per-program` carriage and a candidate for the MSF `bitrate` field. With 0, a per-program track of a single-program source without `--retain-null` measures the rate from the PCR when the source carries null packets, and a warning says when no rate is declared. MSFTS-02 forbids `mpeg2tsMuxRate` in both unmodified modes; an explicit value there produces a warning and is omitted from that field |
 | `--fragment-ms <ms>` | `250` | Object media-duration hint and local mock pacing; RAPs determine media Group boundaries |
@@ -163,7 +164,7 @@ ffmpeg -re -i input.ts -c copy -f mpegts \
 
 **SRT ingest always uses unmodified carriage** (`--publish-multiplex` says so
 explicitly). A contribution feed is forwarded as received, so the per-program
-options (`--retain-si`, `--retain-null`) do not apply and are ignored; passing
+options (`--retain-si`, `--si`, `--retain-null`) do not apply and are ignored; passing
 them prints a warning. The catalog omits `mpeg2tsMuxRate` for either
 unmodified mode, but `--mux-rate` remains a candidate for catalog `bitrate`
 (see [DEVELOPER.md](DEVELOPER.md)). Use a file or FIFO source if you need

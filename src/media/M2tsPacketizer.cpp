@@ -402,7 +402,11 @@ QList<int> M2tsPacketizer::retainedSiPids() const {
 }
 
 void M2tsPacketizer::setRetainSiTables(bool retain) {
-    m_retainSiTables = retain;
+    setSiTables(retain ? allSiTables() : QSet<SiTable>());
+}
+
+void M2tsPacketizer::setSiTables(QSet<SiTable> tables) {
+    m_siTables = std::move(tables);
 }
 
 void M2tsPacketizer::setRetainNullPackets(bool retain) {
@@ -709,13 +713,14 @@ SectionRewriter* M2tsPacketizer::rewriterFor(int pid) {
     if (pid == 0x0001) {
         return &m_catRewriter;
     }
-    // With --retain-si, the SDT and the EIT keep only the carried service
+    // With SI tables kept, the SDT and the EIT keep only the carried service
     // (draft "Per-Program": SHOULD rewrite the SI). The NIT, TDT, and TOT pass
     // unchanged.
-    if (m_retainSiTables && pid == 0x0011) {
+    if (pid == 0x0011 && (m_siTables.contains(SiTable::Sdt) || m_siTables.contains(SiTable::Bat))) {
         return &m_sdtRewriter;
     }
-    if (m_retainSiTables && pid == 0x0012) {
+    if (pid == 0x0012 &&
+        (m_siTables.contains(SiTable::EitPresentFollowing) || m_siTables.contains(SiTable::EitSchedule))) {
         return &m_eitRewriter;
     }
     return nullptr;
@@ -732,21 +737,33 @@ SectionRewriter::Decision M2tsPacketizer::rewriteSection(int pid, const QByteArr
     }
     if (pid == 0x0011) {
         // SDT actual: the carried service only. SDT other describes other
-        // transport streams. The BAT passes unchanged.
+        // transport streams. The BAT passes unchanged. A table that is not
+        // selected goes, and so does any other table on this PID.
         if (tableId == 0x42) {
-            return rewriteSdt(section);
+            return m_siTables.contains(SiTable::Sdt) ? rewriteSdt(section) : Decision{};
         }
-        return tableId == 0x46 ? Decision{} : Decision{Decision::Keep, {}};
+        if (tableId == 0x46) {
+            return Decision{};
+        }
+        const bool kept = tableId == 0x4A ? m_siTables.contains(SiTable::Bat)
+                                          : m_siTables.contains(SiTable::Sdt) || m_siTables.contains(SiTable::Bat);
+        return kept ? Decision{Decision::Keep, {}} : Decision{};
     }
     if (pid == 0x0012) {
         // EIT actual, present/following (0x4E) and schedule (0x50 to 0x5F):
         // the sections of the carried service, unchanged. EIT other (0x4F,
         // 0x60 to 0x6F) describes other transport streams.
         const int serviceId = (static_cast<unsigned char>(section[3]) << 8) | static_cast<unsigned char>(section[4]);
+        const bool presentFollowing = m_siTables.contains(SiTable::EitPresentFollowing);
+        const bool schedule = m_siTables.contains(SiTable::EitSchedule);
         if (tableId == 0x4E || (tableId >= 0x50 && tableId <= 0x5F)) {
-            return serviceId == m_programNumber ? Decision{Decision::Keep, {}} : Decision{};
+            const bool selected = tableId == 0x4E ? presentFollowing : schedule;
+            return selected && serviceId == m_programNumber ? Decision{Decision::Keep, {}} : Decision{};
         }
-        return tableId == 0x4F || (tableId >= 0x60 && tableId <= 0x6F) ? Decision{} : Decision{Decision::Keep, {}};
+        if (tableId == 0x4F || (tableId >= 0x60 && tableId <= 0x6F)) {
+            return Decision{};
+        }
+        return presentFollowing || schedule ? Decision{Decision::Keep, {}} : Decision{};
     }
     return Decision{};
 }
@@ -934,7 +951,7 @@ void M2tsPacketizer::rewritePat() {
         entries.append(static_cast<char>(0xE0 | ((pid >> 8) & 0x1F)));
         entries.append(static_cast<char>(pid & 0xFF));
     };
-    if (m_retainSiTables && m_networkPid >= 0) {
+    if (m_siTables.contains(SiTable::Nit) && m_networkPid >= 0) {
         appendEntry(0, m_networkPid);
     }
     appendEntry(m_programNumber, m_pmtPid);
@@ -1013,16 +1030,20 @@ void M2tsPacketizer::selectPids() {
     for (int pid : m_emmPids) {
         m_selectedPids.set(pid);
     }
-    // Optional SI-table retention (draft "Per-Program"): keep the well-known
-    // DVB PSI/SI PIDs (NIT 0x10, SDT/BAT 0x11, EIT 0x12, TDT/TOT 0x14) alongside
-    // the selected program.
-    if (m_retainSiTables) {
-        m_retainedSiPids.clear();
-        for (int siPid : {0x0010, 0x0011, 0x0012, 0x0014}) {
+    // Optional SI-table retention (draft "Per-Program"): keep the PIDs of the
+    // chosen DVB SI tables (NIT 0x10, SDT/BAT 0x11, EIT 0x12, TDT/TOT 0x14)
+    // alongside the selected program.
+    m_retainedSiPids.clear();
+    const auto keepPid = [this](int siPid, bool selected) {
+        if (selected) {
             m_selectedPids.set(siPid);
             m_retainedSiPids.append(siPid);
         }
-    }
+    };
+    keepPid(0x0010, m_siTables.contains(SiTable::Nit));
+    keepPid(0x0011, m_siTables.contains(SiTable::Sdt) || m_siTables.contains(SiTable::Bat));
+    keepPid(0x0012, m_siTables.contains(SiTable::EitPresentFollowing) || m_siTables.contains(SiTable::EitSchedule));
+    keepPid(0x0014, m_siTables.contains(SiTable::TdtTot));
 }
 
 bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QString* error) {
