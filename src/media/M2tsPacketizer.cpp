@@ -148,6 +148,11 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
     *videoPid = -1;
     *pcrPid = ((static_cast<unsigned char>(section[8]) & 0x1f) << 8) |
               static_cast<unsigned char>(section[9]);
+    // PCR_PID 0x1FFF means no PCR (ISO/IEC 13818-1 Section 2.4.4.9), and the
+    // PIDs 0x0000 to 0x000F carry tables, never a PCR: either is none.
+    if (*pcrPid <= 0x000F || *pcrPid == 0x1FFF) {
+        *pcrPid = -1;
+    }
     const int programInfoLength = ((static_cast<unsigned char>(section[10]) & 0x0f) << 8) |
                                   static_cast<unsigned char>(section[11]);
     readCaDescriptors(section, 12, std::min(12 + programInfoLength, sectionEnd), ecmPids, caSystems);
@@ -1105,7 +1110,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // a new Group starts with this packet.
         unsigned causes = 0;
         if (m_sourceGaps && packetOffset > 0 && m_sourceGaps->takeUpTo(packetOffset, &causes)) {
-            restartAfterGap();
+            restartAfterGap(m_nextObjectId > 0 || !payload.isEmpty());
             if (!payload.isEmpty()) {
                 // The next Object starts with it, and a Group with that Object.
                 // Its causes wait with it: they are not this Object's gap.
@@ -1132,7 +1137,8 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // Live PSI tracking, in every mode: the PAT and the PMT of the selected
         // program update the filter, or end the track. The packet that ends the
         // track is not published.
-        // A view of the TS packet, without a copy; packet outlives every use.
+        // A view of the TS packet, without a copy. It is valid while packet
+        // keeps its buffer: not after the PAT rewrite below replaces it.
         const QByteArray tsView = QByteArray::fromRawData(packet.constData() + (m_packetSize == 192 ? 4 : 0), 188);
         const int pid = pidOf(tsView);
         if (pid == 0x0000 || pid == m_pmtPid) {
@@ -1178,6 +1184,14 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
                 }
                 packet = rewrittenPatPacket(packet, m_patContinuityCounter);
                 m_patContinuityCounter = (m_patContinuityCounter + 1) & 0x0F;
+            } else if (m_markDiscontinuity && pid == m_pcrPid && pcrOf(tsView) >= 0) {
+                // MSFTS 5.4: a PCR discontinuity between Groups that the
+                // publisher introduces is signalled with discontinuity_indicator
+                // in the first packet that carries a PCR in the new Group. The
+                // packet is the source's, so tsView still shows it, and its
+                // adaptation field holds the PCR, so octet 5 is its flags.
+                packet.data()[(m_packetSize == 192 ? 4 : 0) + 5] |= 0x80;
+                m_markDiscontinuity = false;
             }
         }
         payload += packet;
@@ -1332,14 +1346,15 @@ void M2tsPacketizer::skipToFirstGap() {
     }
     unsigned causes = 0;
     m_sourceGaps->takeUpTo(m_sourceOffset, &causes);
-    restartAfterGap();
+    // The track starts here: no Group precedes this one.
+    restartAfterGap(false);
     const double seconds = m_measuredBitrate > 0 ? static_cast<double>(skipped) * 8 / m_measuredBitrate : 0;
     qWarning("The source skipped ahead before the first Object (%s): %llu bytes read before the gap (about "
              "%.1f s) are not published, and the track starts where the source resumed.",
              gapReason(causes).constData(), static_cast<unsigned long long>(skipped), seconds);
 }
 
-void M2tsPacketizer::restartAfterGap() {
+void M2tsPacketizer::restartAfterGap(bool discontinuity) {
     // A section in progress cannot continue across the gap.
     m_patAssembler.reset();
     m_pmtAssembler.reset();
@@ -1348,6 +1363,15 @@ void M2tsPacketizer::restartAfterGap() {
     m_patPartsLast = -1;
     // The time skipped is no Group length.
     m_lastGroupPtsUs.reset();
+    // Per-program carriage: the Group that starts at the gap starts at a
+    // random access point, as the first one does, so the packets before the
+    // next one go (MSFTS 5.2). The unmodified modes keep every packet.
+    // It also marks the PCR discontinuity after a published Group (MSFTS
+    // 5.4), which the unmodified modes leave as the source sent it.
+    if (!m_transparent) {
+        m_leadInDropped = false;
+        m_markDiscontinuity = discontinuity;
+    }
 }
 
 QByteArray M2tsPacketizer::lookAheadPacket(qsizetype offset) {
@@ -1501,9 +1525,10 @@ bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
 }
 
 bool M2tsPacketizer::randomAccess() const {
-    // SRT recovery can fall back to a packet boundary without a RAP. A track
-    // with source gaps cannot promise that every Group begins at one.
-    return m_dropLeadIn && !m_sourceGaps;
+    // SRT recovery can fall back to a packet boundary without a RAP, so an
+    // unmodified track with source gaps cannot promise that every Group
+    // begins at one. Per-program carriage drops to the next RAP after a gap.
+    return m_dropLeadIn && (!m_sourceGaps || !m_transparent);
 }
 
 bool M2tsPacketizer::namesProgram() const {

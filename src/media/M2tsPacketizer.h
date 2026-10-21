@@ -135,6 +135,8 @@ public:
     void setRetainNullPackets(bool retain);      // keep null (0x1FFF) packets
     // Live source: where the stream skips ahead (SRT ingest). A Group starts at
     // each gap, and the track starts after a gap found before its first Object.
+    // In per-program carriage, that Group starts at the next random access
+    // point, and its first PCR has discontinuity_indicator set.
     void setSourceGaps(std::shared_ptr<SourceGapLog> gaps);
 
     bool open(int requestedProgramNumber, QString* error);
@@ -204,8 +206,11 @@ private:
     // Before the first Object: when the source already skipped ahead, drop
     // what came before the gap, so that the track starts at the live edge.
     void skipToFirstGap();
-    // After a gap, the PSI sections in progress and the Group timing restart.
-    void restartAfterGap();
+    // After a gap, the PSI sections in progress and the Group timing restart,
+    // and per-program carriage drops to the next random access point. It
+    // marks the PCR discontinuity when a published Group precedes the gap
+    // (discontinuity), as MSFTS 5.4 asks between consecutive Groups only.
+    void restartAfterGap(bool discontinuity);
     // Per-program carriage: the rewriter of a table PID other than the PAT,
     // or nullptr, and the decision for each of its sections.
     SectionRewriter* rewriterFor(int pid);
@@ -331,6 +336,9 @@ private:
     // The hops that skipped ahead at the gap the next Group starts at
     // (SourceGapLog::Cause bits, of that offset only), for its warning.
     unsigned m_gapCauses = 0;
+    // Per-program carriage: after a gap, the next packet on the PCR PID that
+    // carries a PCR gets discontinuity_indicator.
+    bool m_markDiscontinuity = false;
 };
 
 } // namespace moq2ts

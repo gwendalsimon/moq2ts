@@ -57,7 +57,7 @@ public:
     explicit LivePipeline(QObject* parent = nullptr);
     ~LivePipeline() override;
 
-    void start(const PublishConfig& cfg, MoqxrPublisher* publisher);
+    void start(const PublishConfig& cfg, IMoqOutput* publisher);
     void stop();
     void requestStop();
     void waitForStopped();
@@ -74,7 +74,7 @@ private:
     void runLoop();
 
     PublishConfig m_config;
-    MoqxrPublisher* m_publisher = nullptr;
+    IMoqOutput* m_publisher = nullptr;
 
     std::atomic<bool> m_running {false};
     std::thread m_workerThread;

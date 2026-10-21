@@ -874,6 +874,50 @@ int main() {
                      "gap at offset 0: no gap, the Groups follow the RAPs");
     }
 
+    // A PMT whose PCR_PID is 0 (the PAT PID) names no PCR PID: PIDs 0x0000 to
+    // 0x000F carry tables, never a PCR. After a gap, per-program carriage
+    // looks for the first PCR to mark; the PAT packets it rewrites are not
+    // looked at, and go out with their table unchanged.
+    {
+        const auto video = [](int cc, bool rap) {
+            return rap ? tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000 * cc), cc, 0x40)
+                       : tb::tsPacket(0x100, false, QByteArray(184, char(cc)), cc);
+        };
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x0000, {{0x1B, 0x100}}));
+        ts += video(0, true) + video(1, false) + tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), 1);
+        const std::uint64_t gapOffset = static_cast<std::uint64_t>(ts.size());
+        ts += video(2, true) + tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), 2) + video(3, false);
+        const QString fifo = dir.filePath("pcr-pid-zero.fifo");
+        ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+        std::thread writer([&] { writeFile(fifo, ts); });
+        auto gaps = std::make_shared<moq2ts::SourceGapLog>();
+        M2tsPacketizer packetizer(fifo);
+        packetizer.setSourceGaps(gaps);
+        QString error;
+        QList<QByteArray> patPackets;
+        bool opened = packetizer.open(1, &error);
+        if (opened) {
+            M2tsObject object;
+            while (packetizer.readObject(1, &object, &error)) {
+                if (object.objectId == 0 && object.groupId == 0) {
+                    gaps->record(gapOffset);
+                }
+                if (pidOfPacket(object.payload) == 0x0000) {
+                    patPackets.append(object.payload);
+                }
+            }
+        }
+        writer.join();
+        ok &= expect(opened, "PCR_PID 0: opens: " + error.toStdString());
+        ok &= expect(packetizer.pcrPid() == -1, "PCR_PID 0: no PCR PID (" + std::to_string(packetizer.pcrPid()) + ")");
+        bool unchanged = !patPackets.isEmpty();
+        for (const QByteArray& packet : patPackets) {
+            unchanged = unchanged && packet.size() == 188 && packet[4] == char(0x00) && packet[5] == char(0x00);
+        }
+        ok &= expect(unchanged, "PCR_PID 0: the rewritten PAT packets keep pointer_field 0 and table_id 0");
+    }
+
     // A multiplex without a reference program goes on when the program whose
     // random access points cut Groups leaves the PAT: the catalog names no
     // program. With --program, the catalog names it, so the track ends (draft

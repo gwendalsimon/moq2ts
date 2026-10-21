@@ -218,11 +218,14 @@ while the publisher waits for its first subscriber, it keeps the newest media
 and drops the oldest. The stream tries to resume at a random access point of the
 PID that starts Groups. If none arrives, the safety fallback can resume at a
 packet boundary. Either way the gap starts a new Group, never one already in
-progress. The packets are not modified to mark it: in the unmodified modes a
+progress. In the unmodified modes the packets are not modified to mark it: a
 discontinuity in the source reaches the subscriber unchanged (draft "PCR and
-Timing"). A gap before the first Object is not published at all: the track
-starts at the live edge, and the data read before the gap is dropped with a
-warning.
+Timing"). In per-program carriage the Group starts at the next random access
+point, the packets before it are dropped, the first packet that carries a PCR
+in that Group has its `discontinuity_indicator` set, and the catalog declares
+`mpeg2tsRandomAccess`. A gap before the first Object is not published at all:
+the track starts at the live edge, and the data read before the gap is dropped
+with a warning. That first Group is not marked.
 
 ## Run: live feed from ffmpeg (server / near-encoder)
 
