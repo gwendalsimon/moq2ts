@@ -69,9 +69,20 @@ struct MsftsCatalog {
     qint64 generatedAtMs = 0;
 };
 
+// The mpeg2tsMuxRate (MSFTS 6.7) for a program measured at measuredBps: 10 %
+// above it, to cover the jitter of a fixed-rate service over the one-second
+// measure, rounded up to a multiple of 10,000 bit/s. 0 when measuredBps <= 0.
+qint64 workedOutMuxRate(qint64 measuredBps);
+
 class MsftsMuxer {
 public:
     static QByteArray catalogJson(const MsftsCatalog& catalog);
+    // One catalog listing every entry: each contributes its media track, its
+    // timeline track (when named), and its initDataList entry (when it has
+    // initData), in list order. Root fields (version, generatedAt) come from
+    // the first entry. An empty list yields an empty "tracks" array and no
+    // initDataList.
+    static QByteArray catalogJson(const QList<MsftsCatalog>& catalogs);
 
     // One MSF media timeline record (draft-ietf-moq-msf-01 Section 7.1.1):
     //   [mediaPresentationTimeMs, [groupId, objectId], wallclockMs]

@@ -108,6 +108,66 @@ int main() {
                      "initData resolves through initRef");
     }
 
+    // Several per-program tracks share one catalog (MSF 5.1.7: one initDataList
+    // after tracks, one entry per track that has initData).
+    {
+        MsftsCatalog a = baseCatalog(Mpeg2tsMode::PerProgram);
+        a.track = QStringLiteral("program-101");
+        a.timelineTrack = QStringLiteral("program-101.timeline");
+        a.programNumber = 101;
+        a.mpeg2tsMuxRateBps = 4000000;
+        a.siPids = {0x11};
+        a.generatedAtMs = 7;
+        MsftsCatalog b = baseCatalog(Mpeg2tsMode::PerProgram);
+        b.track = QStringLiteral("program-102");
+        b.timelineTrack = QStringLiteral("program-102.timeline");
+        b.programNumber = 102;
+        b.mpeg2tsMuxRateBps = 6000000;
+        b.siPids = {0x11, 0x12};
+        b.initData = QByteArray(188, char(0x48));
+        const QByteArray json = MsftsMuxer::catalogJson(QList<MsftsCatalog>{a, b});
+        const QJsonObject root = QJsonDocument::fromJson(json).object();
+        const QJsonArray tracks = root.value("tracks").toArray();
+        ok &= expect(tracks.size() == 4, "two programs: four tracks");
+        ok &= expect(tracks.at(0).toObject().value("name").toString() == "program-101" &&
+                         tracks.at(1).toObject().value("name").toString() == "program-101.timeline" &&
+                         tracks.at(2).toObject().value("name").toString() == "program-102" &&
+                         tracks.at(3).toObject().value("name").toString() == "program-102.timeline",
+                     "two programs: track order");
+        ok &= expect(tracks.at(1).toObject().value("depends").toArray().at(0).toString() == "program-101" &&
+                         tracks.at(3).toObject().value("depends").toArray().at(0).toString() == "program-102",
+                     "two programs: each timeline depends on its own track");
+        const QJsonObject ta = tracks.at(0).toObject();
+        const QJsonObject tb = tracks.at(2).toObject();
+        ok &= expect(ta.value("mpeg2tsProgramNumber").toInt() == 101 && tb.value("mpeg2tsProgramNumber").toInt() == 102,
+                     "two programs: program numbers");
+        ok &= expect(ta.value("mpeg2tsMuxRate").toInteger() == 4000000 && tb.value("mpeg2tsMuxRate").toInteger() == 6000000,
+                     "two programs: mux rates");
+        ok &= expect(ta.value("mpeg2tsSiPids").toArray().size() == 1 && tb.value("mpeg2tsSiPids").toArray().size() == 2,
+                     "two programs: SI PIDs");
+        ok &= expect(ta.value("initRef").toString() == "init-program-101" &&
+                         tb.value("initRef").toString() == "init-program-102",
+                     "two programs: initRef");
+        const QJsonArray list = root.value("initDataList").toArray();
+        ok &= expect(list.size() == 2 && list.at(0).toObject().value("id").toString() == "init-program-101" &&
+                         list.at(1).toObject().value("id").toString() == "init-program-102",
+                     "two programs: initDataList order");
+        ok &= expect(json.indexOf("\"initDataList\"") > json.indexOf("\"tracks\""), "two programs: list after tracks");
+        ok &= expect(root.value("generatedAt").toInteger() == 7, "two programs: root fields from the first entry");
+
+        // A track without initData adds no entry.
+        a.initData.clear();
+        const QJsonObject partial = QJsonDocument::fromJson(MsftsMuxer::catalogJson(QList<MsftsCatalog>{a, b})).object();
+        ok &= expect(partial.value("initDataList").toArray().size() == 1 &&
+                         !partial.value("tracks").toArray().at(0).toObject().contains("initRef"),
+                     "two programs: no entry without initData");
+
+        // The empty list yields an empty tracks array and no initDataList.
+        const QJsonObject empty = QJsonDocument::fromJson(MsftsMuxer::catalogJson(QList<MsftsCatalog>{})).object();
+        ok &= expect(empty.value("tracks").toArray().isEmpty() && !empty.contains("initDataList"),
+                     "empty list: empty tracks, no initDataList");
+    }
+
     // Media timeline records take the floor in milliseconds (MSF 7.1.1).
     ok &= expect(MsftsMuxer::mediaTimelineRecord(10010999, 3, 0, 1759924158381999) == "[10010,[3,0],1759924158381]",
                  "timeline record floors both times");
@@ -156,5 +216,12 @@ int main() {
     if (ok) {
         std::cout << "msfts catalog tests passed\n";
     }
+    // The mux rate worked out from a program's measured rate: 10 % headroom,
+    // rounded up to a multiple of 10,000 bit/s; none without a measure.
+    ok &= expect(moq2ts::workedOutMuxRate(4000000) == 4400000, "worked-out mux rate: 4,000,000 gives 4,400,000");
+    ok &= expect(moq2ts::workedOutMuxRate(1234567) == 1360000, "worked-out mux rate: rounds up to 10,000");
+    ok &= expect(moq2ts::workedOutMuxRate(0) == 0 && moq2ts::workedOutMuxRate(-5) == 0,
+                 "worked-out mux rate: 0 without a measure");
+
     return ok ? 0 : 1;
 }
