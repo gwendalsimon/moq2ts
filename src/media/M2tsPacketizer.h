@@ -326,7 +326,11 @@ private:
     std::uint64_t m_sourceOffset = 0;
     QByteArray m_carryPacket;
     std::uint64_t m_carryOffset = 0;
+    unsigned m_carryGapCauses = 0;   // of the gap before m_carryPacket
     bool m_groupStartsAtGap = false;
+    // The hops that skipped ahead at the gap the next Group starts at
+    // (SourceGapLog::Cause bits, of that offset only), for its warning.
+    unsigned m_gapCauses = 0;
 };
 
 } // namespace moq2ts

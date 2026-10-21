@@ -348,7 +348,7 @@ void SrtSource::listenLoop(int listenSock, int pipeFd, std::atomic<bool>& stopRe
         // first byte is the next one the reader gets. Streams that bridge two
         // encoders can jump in time and PCR here.
         if (!first && gaps != nullptr) {
-            gaps->record(written);
+            gaps->record(written, SourceGapLog::SrtNewCaller);
         }
         first = false;
 

@@ -20,6 +20,7 @@
 
 using moq2ts::M2tsObject;
 using moq2ts::M2tsPacketizer;
+using moq2ts::SourceGapLog;
 namespace tb = moq2ts::test;
 
 namespace {
@@ -801,7 +802,8 @@ int main() {
         };
         // gapBeforeFirst: the gap is known at open(); otherwise it is recorded
         // once the first Object is out.
-        const auto run = [&](const QString& name, bool gapBeforeFirst, std::uint64_t offset) {
+        const auto run = [&](const QString& name, bool gapBeforeFirst, std::uint64_t offset,
+                             unsigned cause = SourceGapLog::SrtReceiveBuffer) {
             GapRun result;
             const QString fifo = dir.filePath(name);
             ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
@@ -811,7 +813,7 @@ int main() {
             packetizer.setTransparent(true);
             packetizer.setSourceGaps(gaps);
             if (gapBeforeFirst) {
-                gaps->record(offset);
+                gaps->record(offset, cause);
             }
             if (packetizer.open(0, &result.error)) {
                 result.randomAccess = packetizer.randomAccess();
@@ -819,7 +821,7 @@ int main() {
                 while (packetizer.readObject(3, &object, &result.error)) {
                     result.objects.append(object);
                     if (!gapBeforeFirst && result.objects.size() == 1) {
-                        gaps->record(offset);
+                        gaps->record(offset, cause);
                     }
                 }
             }
@@ -847,6 +849,22 @@ int main() {
                          first.objects[0].payload == packet(6) + packet(7) + packet(8) &&
                          first.objects[0].groupId == 0 && first.objects[0].startsGroup,
                      "gap before the first Object: the track starts where the source resumed, in Group 0");
+
+        // The warning names the hop that skipped ahead.
+        qInstallMessageHandler(captureWarning);
+        warnings().clear();
+        run("gap-srt.fifo", false, gapOffset);
+        const QStringList srtWarnings = warnings();
+        warnings().clear();
+        run("gap-caller.fifo", false, gapOffset, SourceGapLog::SrtNewCaller);
+        const QStringList callerWarnings = warnings();
+        qInstallMessageHandler(nullptr);
+        ok &= expect(callerWarnings.filter("new SRT caller").size() == 1 &&
+                         callerWarnings.filter("receive buffer").isEmpty(),
+                     "gap warning: a new SRT caller is named, not the receive buffer: " +
+                         callerWarnings.join(" | ").toStdString());
+        ok &= expect(srtWarnings.filter("SRT receive buffer").size() == 1,
+                     "gap warning: an SRT gap names the SRT receive buffer");
 
         const GapRun none = run("gap-zero.fifo", true, 0);
         ok &= expect(none.error.isEmpty() && none.objects.size() == 3 &&
