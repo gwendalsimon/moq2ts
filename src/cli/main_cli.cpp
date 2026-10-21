@@ -51,32 +51,75 @@ void logLine(std::FILE* stream, const char* tag, const QString& message) {
 }
 
 #ifdef MOQ2TS_HAS_SRT
-// Stops the SRT receive thread and shuts the SRT library down on every exit path,
-// including early returns. Each step is guarded so running twice is harmless.
-struct SrtRuntimeGuard {
-    std::atomic<bool>* stopFlag = nullptr;
-    std::unique_ptr<std::thread>* thread = nullptr;
-    int* sock = nullptr;
-    int* readFd = nullptr;
-
-    ~SrtRuntimeGuard() {
-        if (stopFlag) {
-            stopFlag->store(true, std::memory_order_release);
-        }
-        // The receive thread must be gone before srt_cleanup() tears down libsrt.
-        if (thread && *thread && (*thread)->joinable()) {
-            (*thread)->join();
-        }
-        if (sock && *sock >= 0) {
-            moq2ts::SrtSource::close(*sock);
-            *sock = -1;
-        }
-        if (readFd && *readFd >= 0) {
-            ::close(*readFd);
-            *readFd = -1;
-        }
+// SRT ingest into a pipe: a receive thread writes the TS it receives to the
+// write end, and the pipeline reads readPath(). stop() and the destructor stop
+// and join the thread, then close the socket and the read end; the destructor
+// also shuts the SRT library down. Each step is guarded, so running twice is
+// harmless. Declare it before the publisher and the pipeline, so it outlives
+// them on every exit path: srt_startup() happens inside connect()/listen(),
+// and leaving it unpaired crashes in libsrt's exit-time destructors.
+class SrtIngest {
+public:
+    SrtIngest() = default;
+    SrtIngest(const SrtIngest&) = delete;
+    SrtIngest& operator=(const SrtIngest&) = delete;
+    ~SrtIngest() {
+        stop();
         moq2ts::SrtSource::shutdown();
     }
+
+    // Connects out (caller) or binds (listener), opens the pipe, and starts
+    // the receive thread. After a drop the stream resumes at a random access
+    // point on resyncPid when it is set and >= 0, and gaps records where it
+    // skipped ahead. Returns an empty string on success, the error otherwise.
+    QString start(const moq2ts::SrtSource::Config& cfg, std::shared_ptr<std::atomic<int>> resyncPid,
+                  std::shared_ptr<moq2ts::SourceGapLog> gaps) {
+        const bool listener = cfg.mode == moq2ts::SrtSource::Config::Mode::Listener;
+        const QString err = listener ? moq2ts::SrtSource::listen(cfg, m_sock) : moq2ts::SrtSource::connect(cfg, m_sock);
+        if (!err.isEmpty()) {
+            return err;
+        }
+        int fds[2] = {-1, -1}; // [0]=read, [1]=write
+        if (::pipe(fds) != 0) {
+            return QStringLiteral("Failed to create pipe for SRT: %1").arg(strerror(errno));
+        }
+        m_readFd = fds[0];
+        m_thread = std::make_unique<std::thread>(
+            [sock = m_sock, listener, writeFd = fds[1], stop = &m_stop, resyncPid, gaps]() {
+                if (listener) {
+                    moq2ts::SrtSource::listenLoop(sock, writeFd, *stop, resyncPid.get(), gaps.get());
+                } else {
+                    moq2ts::SrtSource::receiveLoop(sock, writeFd, *stop, resyncPid.get(), gaps.get());
+                }
+                ::close(writeFd); // close write end to signal EOF to reader
+            });
+        return {};
+    }
+
+    // The read end of the pipe, as a path the pipeline opens.
+    QString readPath() const { return QStringLiteral("/dev/fd/%1").arg(m_readFd); }
+
+    void stop() {
+        m_stop.store(true, std::memory_order_release);
+        // The receive thread must be gone before srt_cleanup() tears down libsrt.
+        if (m_thread && m_thread->joinable()) {
+            m_thread->join();
+        }
+        if (m_sock >= 0) {
+            moq2ts::SrtSource::close(m_sock);
+            m_sock = -1;
+        }
+        if (m_readFd >= 0) {
+            ::close(m_readFd);
+            m_readFd = -1;
+        }
+    }
+
+private:
+    std::atomic<bool> m_stop{false};
+    std::unique_ptr<std::thread> m_thread;
+    int m_sock = -1;
+    int m_readFd = -1;
 };
 #endif  // MOQ2TS_HAS_SRT
 
@@ -227,16 +270,9 @@ int main(int argc, char** argv) {
         return 2;
     }
 #else
-    int srtPipeFds[2] = {-1, -1}; // [0]=read, [1]=write
-    int srtSock = -1;
-    std::atomic<bool> srtStop{false};
-    std::unique_ptr<std::thread> srtThread;
-    // Declared before the publisher/pipeline so it is destroyed after them, and so
-    // it runs on EVERY exit path including the early returns below. srt_startup()
-    // happens inside SrtSource::connect(); leaving it unpaired crashes in libsrt's
-    // exit-time destructors. Every step is idempotent, so the normal shutdown in
-    // aboutToQuit doing the same work first is harmless.
-    SrtRuntimeGuard srtGuard{&srtStop, &srtThread, &srtSock, &srtPipeFds[0]};
+    // Declared before the publisher/pipeline so it is destroyed after them, on
+    // EVERY exit path including the early returns below.
+    SrtIngest srtIngest;
 
     if (useSrt) {
         // Parse the JSON config file (moqxr-compatible format)
@@ -289,51 +325,31 @@ int main(int argc, char** argv) {
                                        .arg(QString::fromStdString(srtCfg.host))
                                        .arg(srtCfg.port)
                                        .arg(srtCfg.latencyMs));
-            const QString err = moq2ts::SrtSource::listen(srtCfg, srtSock);
-            if (!err.isEmpty()) {
-                logLine(stderr, "error", err);
-                return 1;
-            }
         } else {
             logLine(stderr, "srt", QStringLiteral("Caller '%1': connecting to srt://%2:%3 (latency=%4ms)...")
                                        .arg(callerId)
                                        .arg(QString::fromStdString(srtCfg.host))
                                        .arg(srtCfg.port)
                                        .arg(srtCfg.latencyMs));
-
-            const QString err = moq2ts::SrtSource::connect(srtCfg, srtSock);
-            if (!err.isEmpty()) {
-                logLine(stderr, "error", err);
-                return 1;
-            }
-            logLine(stderr, "srt", QStringLiteral("Connected to SRT source"));
         }
 
-        // Create a pipe: SRT thread writes TS to pipe[1], M2tsPacketizer reads from pipe[0]
-        if (::pipe(srtPipeFds) != 0) {
-            logLine(stderr, "error", QStringLiteral("Failed to create pipe for SRT: %1").arg(strerror(errno)));
-            moq2ts::SrtSource::close(srtSock);
-            return 1;
-        }
-
-        // Point the video source at the read end of the pipe
-        cfg.videoSource = QStringLiteral("/dev/fd/%1").arg(srtPipeFds[0]);
-
-        // Start the SRT receive thread. After a drop it resyncs on the PID
-        // whose random access points start Groups, which the pipeline sets.
+        // After a drop the SRT receive thread resyncs on the PID whose random
+        // access points start Groups, which the pipeline sets.
         auto resyncPid = std::make_shared<std::atomic<int>>(-1);
         cfg.resyncPid = resyncPid;
         // The packetizer starts a Group where the receive thread skipped ahead.
         auto sourceGaps = std::make_shared<moq2ts::SourceGapLog>();
         cfg.sourceGaps = sourceGaps;
-        srtThread = std::make_unique<std::thread>([srtSock, listener, writeFd = srtPipeFds[1], &srtStop, resyncPid, sourceGaps]() {
-            if (listener) {
-                moq2ts::SrtSource::listenLoop(srtSock, writeFd, srtStop, resyncPid.get(), sourceGaps.get());
-            } else {
-                moq2ts::SrtSource::receiveLoop(srtSock, writeFd, srtStop, resyncPid.get(), sourceGaps.get());
-            }
-            ::close(writeFd); // close write end to signal EOF to reader
-        });
+        const QString err = srtIngest.start(srtCfg, resyncPid, sourceGaps);
+        if (!err.isEmpty()) {
+            logLine(stderr, "error", err);
+            return 1;
+        }
+        if (!listener) {
+            logLine(stderr, "srt", QStringLiteral("Connected to SRT source"));
+        }
+        // Point the video source at the read end of the pipe
+        cfg.videoSource = srtIngest.readPath();
 
         // SRT is a live source - no pacing needed (real-time from encoder)
         cfg.pacedFileSource = false;
@@ -446,9 +462,10 @@ int main(int argc, char** argv) {
 
     // Poll for SIGINT/SIGTERM and for natural completion (the worker flips
     // running() false at EOF). started only after start() so running() is true.
-    auto* poll = new QTimer(&app);
-    poll->setInterval(200);
-    QObject::connect(poll, &QTimer::timeout, &app, [&]() {
+    // Local, so it cannot fire after the pipeline it reads has gone.
+    QTimer poll;
+    poll.setInterval(200);
+    QObject::connect(&poll, &QTimer::timeout, &app, [&]() {
         if (g_interrupted.load(std::memory_order_acquire)) {
             logLine(stderr, "status", QStringLiteral("Interrupted; stopping."));
             pipeline.requestStop();
@@ -459,7 +476,7 @@ int main(int argc, char** argv) {
             app.quit();
         }
     });
-    poll->start();
+    poll.start();
 
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
@@ -468,20 +485,9 @@ int main(int argc, char** argv) {
         publisher.stop();
         pipeline.requestStop();
 #ifdef MOQ2TS_HAS_SRT
-        // Stop SRT thread if running
-        srtStop.store(true, std::memory_order_release);
-        if (srtThread && srtThread->joinable()) {
-            srtThread->join();
-        }
-        if (srtSock >= 0) {
-            moq2ts::SrtSource::close(srtSock);
-            srtSock = -1;
-        }
-        if (srtPipeFds[0] >= 0) {
-            ::close(srtPipeFds[0]);
-            srtPipeFds[0] = -1;
-        }
-        // srt_cleanup() itself is left to srtGuard, which runs on every exit path.
+        // Stop SRT thread if running. srt_cleanup() itself is left to the
+        // SrtIngest destructor, which runs on every exit path.
+        srtIngest.stop();
 #endif  // MOQ2TS_HAS_SRT
         pipeline.waitForStopped(); // bounded (3s) + detach fallback
         std::fprintf(stdout, "[final] objects=%lld bytes=%lld groups=%lld sent_objects=%lld sent_bytes=%lld\n",
