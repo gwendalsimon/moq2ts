@@ -25,6 +25,9 @@ QByteArray gapReason(unsigned causes) {
     if (causes & SourceGapLog::SrtReceiveBuffer) {
         reasons.append("the SRT receive buffer kept only the newest media while nothing read it");
     }
+    if (causes & SourceGapLog::ProgramQueue) {
+        reasons.append("the program's queue overflowed: the track fell behind the source");
+    }
     if (causes & SourceGapLog::SrtNewCaller) {
         reasons.append("a new SRT caller connected: its stream can jump in time and PCR");
     }

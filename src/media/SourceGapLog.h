@@ -28,6 +28,7 @@ public:
     // hops can skip ahead at one offset, so a gap holds a set of these bits.
     enum Cause : unsigned {
         SrtReceiveBuffer = 1u << 0,   // the SRT ring kept only its newest media
+        ProgramQueue = 1u << 1,       // a program's PacketQueueDevice overflowed
         SrtNewCaller = 1u << 3,       // an SRT listener accepted a caller after the first one
     };
 
