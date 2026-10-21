@@ -84,8 +84,10 @@ qint64 trackMaxBitrate(const M2tsPacketizer& packetizer, const PublishConfig& co
 }
 
 // The one place where a PSI change reaches the catalog: a new independent
-// catalog, because MSF -01 Section 5.3 forbids changing a track. Switch to the
-// "update" operation once MSF -02 and the SDK support it (moq-wg/msf#183).
+// catalog with the updated initialization data, as MSFTS 6.12 asks. A delta
+// update could not carry it: MSF -01 Section 5.3 allows only adding, cloning,
+// or removing a track. Switch to the "update" operation once MSF -02 and the
+// SDK support it (moq-wg/msf#183).
 PublishedObject updateCatalog(PublishState* st, const QByteArray& initData) {
     st->catalog.initData = initData;
     if (st->catalog.isLive) {
