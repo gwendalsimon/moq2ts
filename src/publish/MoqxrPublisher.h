@@ -37,6 +37,10 @@ struct PublishedObject {
     // True when no later object shares this group (a timeline or catalog
     // object), so the publisher closes the group without looking ahead.
     bool finalInGroup = false;
+    // The track this Object describes, which must go out first: a timeline
+    // Object records a media Object (MSF -01 Section 7: data about previously
+    // published Groups). Empty when it depends on none.
+    QString afterTrack;
 };
 
 class IMoqOutput {

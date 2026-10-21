@@ -216,6 +216,7 @@ set(CORE_HEADERS
     src/media/SiTables.h
     src/media/MsftsMuxer.h
     src/publish/MoqxrPublisher.h
+    src/publish/ObjectLookahead.h
 )
 
 add_library(moq2ts-core OBJECT ${CORE_SOURCES} ${CORE_HEADERS})
@@ -479,4 +480,9 @@ if(UNIX AND NOT APPLE)
         target_link_libraries(moq2ts-psi-assembler-tests PRIVATE PkgConfig::LIBAVFORMAT PkgConfig::LIBAVUTIL)
     endif()
     add_test(NAME moq2ts-psi-assembler-tests COMMAND moq2ts-psi-assembler-tests)
+
+    add_executable(moq2ts-object-lookahead-tests tests/object_lookahead_test.cpp)
+    target_include_directories(moq2ts-object-lookahead-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-object-lookahead-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-object-lookahead-tests COMMAND moq2ts-object-lookahead-tests)
 endif()

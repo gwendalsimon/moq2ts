@@ -1,11 +1,11 @@
 #include "MoqxrPublisher.h"
+#include "ObjectLookahead.h"
 
 #include <QDebug>
 #include <QMutexLocker>
 #include <QThread>
 
 #include <chrono>
-#include <deque>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -191,22 +191,19 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         bool catalogSent = false;
         int64_t publisherObjects = 0;
         int64_t publisherBytes = 0;
-        // Look-ahead queue. final_in_subgroup must mark the last object of a group
-        // ON ITS OWN TRACK, and next_object() interleaves the media, catalog and
-        // timeline tracks, so the next object overall is often a different track.
-        // A single-slot look-ahead cannot answer that: we peek forward until an
-        // object on the same track appears, holding the skipped ones in order so
-        // the wire sequence is unchanged. In practice that is one or two objects,
-        // because the timeline is interleaved at most once per media object.
-        std::deque<PublishedObject> lookahead;
+        // final_in_subgroup must mark the last object of a group ON ITS OWN
+        // TRACK, and next_object() interleaves the media, catalog and timeline
+        // tracks (and, for a multi-program source, several media tracks).
+        // ObjectLookahead holds back one object per track until the next object
+        // of that track shows whether its group ended, so a track that stalls
+        // never holds back another track's objects.
+        auto lookahead = std::make_shared<ObjectLookahead>(std::move(nextObject));
         source.next_object = [this,
                               catalogSent,
                               publisherObjects,
                               publisherBytes,
                               catalog,
-                              lookahead,
-                              mediaTrack = mediaTrackName,
-                              nextObject = std::move(nextObject)]() mutable -> std::optional<openmoq::publisher::LiveObject> {
+                              lookahead]() mutable -> std::optional<openmoq::publisher::LiveObject> {
             if (!catalogSent) {
                 catalogSent = true;
                 ++publisherObjects;
@@ -225,37 +222,11 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 };
             }
 
-            if (lookahead.empty()) {
-                std::optional<PublishedObject> first = nextObject();
-                if (!first.has_value()) {
-                    return std::nullopt;
-                }
-                lookahead.push_back(std::move(*first));
+            std::optional<ReadyObject> ready = lookahead->next();
+            if (!ready.has_value()) {
+                return std::nullopt;
             }
-
-            PublishedObject current = std::move(lookahead.front());
-            lookahead.pop_front();
-
-            // Find the next object on the SAME track, pulling more in as needed.
-            // With none (end of stream) current is the last on its track, so it
-            // closes its group.
-            bool isFinalInGroup = true;
-            std::size_t scan = 0;
-            while (!current.finalInGroup) {
-                if (scan < lookahead.size()) {
-                    if (lookahead[scan].trackName == current.trackName) {
-                        isFinalInGroup = lookahead[scan].groupId != current.groupId;
-                        break;
-                    }
-                    ++scan;
-                    continue;
-                }
-                std::optional<PublishedObject> more = nextObject();
-                if (!more.has_value()) {
-                    break;
-                }
-                lookahead.push_back(std::move(*more));
-            }
+            const PublishedObject& current = ready->object;
             ++publisherObjects;
             publisherBytes += current.payload.size();
             emit framePublished(current.trackName, publisherBytes, publisherObjects);
@@ -273,7 +244,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 // Object. moqxr writes the flag into the subgroup header from
                 // the first Object, and the subgroup FIN then ends the Group.
                 .subgroup_contains_group_largest = true,
-                .final_in_subgroup = isFinalInGroup,
+                .final_in_subgroup = ready->finalInGroup,
             };
         };
 
@@ -347,13 +318,17 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
     int64_t publisherBytes = catalog.size();
     emit framePublished(QStringLiteral("catalog"), publisherBytes, publisherObjects);
 
+    // The same look-ahead as the real path, so the mock logs what it would send.
+    ObjectLookahead lookahead(std::move(nextObject));
     while (running.load(std::memory_order_acquire)) {
-        std::optional<PublishedObject> object = nextObject();
-        if (!object.has_value()) {
+        std::optional<ReadyObject> ready = lookahead.next();
+        if (!ready.has_value()) {
             return true;
         }
+        const PublishedObject* object = &ready->object;
         qDebug() << "MOCK MSFTS publish" << object->trackName << "group=" << object->groupId
-                 << "object=" << object->objectId << "bytes=" << object->payload.size();
+                 << "object=" << object->objectId << "bytes=" << object->payload.size()
+                 << "final=" << ready->finalInGroup;
         ++publisherObjects;
         publisherBytes += object->payload.size();
         emit framePublished(object->trackName, publisherBytes, publisherObjects);

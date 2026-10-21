@@ -27,7 +27,9 @@ constexpr std::int64_t kPaceSlackUs = 8000;
 
 // Adds the record of a media Group and returns Object 0 of the timeline Group
 // of the same number, which holds every accessible record (MSF -01 Section
-// 7.3). The history has no bound yet (moq-wg/msf#205).
+// 7.3). The history has no bound yet (moq-wg/msf#205). The Object names the
+// media track as its afterTrack, so the publisher sends it after the media
+// Object it records.
 PublishedObject timelineObject(PublishState* st,
                                const QString& timelineTrackName,
                                const PublishedObject& media,
@@ -47,6 +49,7 @@ PublishedObject timelineObject(PublishState* st,
     timeline.finalInGroup = true;
     timeline.mediaTimeUs = media.mediaTimeUs;
     timeline.mediaDurationUs = 0;
+    timeline.afterTrack = media.trackName;
     return timeline;
 }
 
