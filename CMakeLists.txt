@@ -434,6 +434,16 @@ if(UNIX AND NOT APPLE)
     add_test(NAME moq2ts-ts-ring-tests COMMAND moq2ts-ts-ring-tests)
 endif()
 
+# SRT listener mode: loopback test, only where SRT ingest is compiled in.
+if(UNIX AND NOT APPLE AND MOQ2TS_ENABLE_SRT AND MOQ2TS_SRT_USABLE)
+    enable_testing()
+    add_executable(moq2ts-srt-listener-tests tests/srt_listener_test.cpp)
+    target_include_directories(moq2ts-srt-listener-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-srt-listener-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-srt-listener-tests COMMAND moq2ts-srt-listener-tests)
+    set_tests_properties(moq2ts-srt-listener-tests PROPERTIES TIMEOUT 60)
+endif()
+
 # MSFTS catalog test (Qt Core only), and packetizer test on synthetic TS
 # files. libav is linked when present, because the packetizer's duration
 # probe uses it.

@@ -12,8 +12,8 @@ namespace moq2ts {
 
 class SourceGapLog;
 
-/// Connects to an SRT source in caller mode and delivers received TS packets
-/// to a callback. The callback receives raw TS data (188-byte packets) in the
+/// Connects to an SRT source in caller mode (or listens for one in listener
+/// mode) and delivers received TS packets to a callback. The callback receives raw TS data (188-byte packets) in the
 /// same format as a file read - the existing M2tsPacketizer/LivePipeline can
 /// consume it transparently via a pipe or QFile on /dev/stdin.
 ///
@@ -21,6 +21,11 @@ class SourceGapLog;
 class SrtSource {
 public:
     struct Config {
+        // Caller: connect out to host:port. Listener: bind host:port and wait for
+        // an encoder to push the stream.
+        enum class Mode { Caller, Listener };
+        Mode mode = Mode::Caller;
+        // In listener mode, the address to bind.
         std::string host = "127.0.0.1";
         uint16_t port = 9000;
         int latencyMs = 120;
@@ -38,13 +43,28 @@ public:
     /// Returns empty string on success, error message on failure.
     static QString connect(const Config& cfg, int& sockOut);
 
+    /// Binds host:port and starts listening (listener mode). Returns empty string
+    /// on success, error message on failure.
+    static QString listen(const Config& cfg, int& listenSockOut);
+
     /// Receive loop: reads TS data from the SRT socket and writes it to the
     /// given QIODevice (typically the write end of a pipe). Runs until
     /// stopRequested is set. Call from a worker thread. After a drop, output
     /// resumes at a random access point on resyncPid when it is set and >= 0,
     /// and gaps, when set, records the offset of the gap in the bytes written.
+    /// With outputOffset set, the count of bytes written starts from it and is
+    /// stored back into it, so one offset can span several connections.
     static void receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequested,
-                            const std::atomic<int>* resyncPid = nullptr, SourceGapLog* gaps = nullptr);
+                            const std::atomic<int>* resyncPid = nullptr, SourceGapLog* gaps = nullptr,
+                            std::uint64_t* outputOffset = nullptr);
+
+    /// Listener-mode loop: accepts one caller at a time and runs receiveLoop on
+    /// it until it disconnects, then accepts the next, until stopRequested.
+    /// Everything goes to the same pipe. A caller that follows another starts a
+    /// new stretch of the stream, so a gap is recorded at the offset where its
+    /// data begins. Call from a worker thread.
+    static void listenLoop(int listenSock, int pipeFd, std::atomic<bool>& stopRequested,
+                           const std::atomic<int>* resyncPid = nullptr, SourceGapLog* gaps = nullptr);
 
     /// Clean up the SRT socket.
     static void close(int sock);
