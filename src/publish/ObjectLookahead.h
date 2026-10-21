@@ -34,8 +34,9 @@ struct ReadyObject {
 // An Object with finalInGroup set (a catalog or timeline Object) goes out at
 // once, unless it describes a track that holds an Object (afterTrack): a
 // timeline Object then goes out right after the media Object it records,
-// which MSF -01 Section 7 requires to be published first. At the end of the
-// source, the held Objects go out as final, in the order they arrived.
+// which MSF -01 Section 7 requires to be published first. An endsTrack marker releases its track's held Object as final and is
+// not sent. At the end of the source, the held Objects go out as final, in the
+// order they arrived.
 class ObjectLookahead {
 public:
     explicit ObjectLookahead(std::function<std::optional<PublishedObject>()> source)
@@ -53,9 +54,12 @@ public:
             }
             const auto held = m_held.find(object->trackName);
             if (held != m_held.end()) {
-                const bool final = object->groupId != held->second.object.groupId;
+                const bool final = object->endsTrack || object->groupId != held->second.object.groupId;
                 release(std::move(held->second), final);
                 m_held.erase(held);
+            }
+            if (object->endsTrack) {
+                continue;
             }
             // An Object that describes a held Object waits for it.
             const auto described = object->afterTrack.isEmpty() ? m_held.end() : m_held.find(object->afterTrack);

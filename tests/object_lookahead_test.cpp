@@ -26,6 +26,13 @@ PublishedObject object(const char* track, std::uint64_t group, std::uint64_t id,
     return o;
 }
 
+PublishedObject endOf(const char* track) {
+    PublishedObject o;
+    o.trackName = QString::fromLatin1(track);
+    o.endsTrack = true;
+    return o;
+}
+
 // A source that hands out a script, then ends.
 struct Script {
     std::deque<PublishedObject> objects;
@@ -94,6 +101,26 @@ int main() {
         ok &= expect(bounded, "stalled track: nothing accumulates beyond one Object per track");
     }
 
+    // An endsTrack marker makes A's last Object final at once, and is not sent.
+    {
+        Script script;
+        script.objects = {object("a", 0, 0), object("a", 0, 1), endOf("a")};
+        for (int n = 0; n < 10; ++n) {
+            script.objects.push_back(object("b", 0, n));
+        }
+        ObjectLookahead lookahead(script.source());
+        const auto first = lookahead.next();
+        const auto second = lookahead.next();
+        ok &= expect(first && name(*first) == "a/0/0", "end of track: A's first Object");
+        ok &= expect(second && name(*second) == "a/0/1F", "end of track: A's last Object is final");
+        ok &= expect(script.reads == 3, "end of track: released without reading further");
+        int markers = 0;
+        while (const auto next = lookahead.next()) {
+            markers += next->object.endsTrack ? 1 : 0;
+        }
+        ok &= expect(markers == 0, "end of track: the marker is not sent");
+    }
+
     // A finalInGroup Object goes out at once; the end of the source releases
     // the held Objects as final in arrival order.
     {
@@ -109,8 +136,9 @@ int main() {
 
     // A timeline Object follows the media Object it records (MSF -01 Section
     // 7: data about previously published Groups). It waits with a held media
-    // Object, and goes out right after it when the media track's next Object
-    // or the end of the source releases it.
+    // Object, is not lost when the media track stalls, and goes out right
+    // after it when the media track's next Object, end, or the end of the
+    // source releases it.
     {
         const auto timeline = [](std::uint64_t group) {
             PublishedObject o = object("a.timeline", group, 0, true);
@@ -127,6 +155,29 @@ int main() {
         }
         ok &= expect(got == "a/0/0 a.timeline/0/0F a/0/1F a/1/0F a.timeline/1/0F ",
                      "timeline after media, released by the next Object: " + got);
+
+        // Stalled media track: B flows, the timeline Object waits with A's
+        // held Object, and endsTrack releases both, media first.
+        Script stalled;
+        stalled.objects = {object("a", 0, 0), timeline(0)};
+        for (int n = 0; n < 50; ++n) {
+            stalled.objects.push_back(object("b", n, 0));
+        }
+        stalled.objects.push_back(endOf("a"));
+        ObjectLookahead byEnd(stalled.source());
+        std::vector<std::string> order;
+        bool bounded = true;
+        while (const auto ready = byEnd.next()) {
+            order.push_back(name(*ready));
+            bounded &= byEnd.pending() <= 4;
+        }
+        const auto at = [&order](const std::string& item) {
+            return std::find(order.begin(), order.end(), item) - order.begin();
+        };
+        ok &= expect(at("a/0/0F") < static_cast<long>(order.size()) && at("a.timeline/0/0F") == at("a/0/0F") + 1,
+                     "stalled media: the timeline Object goes out right after its media Object");
+        ok &= expect(at("a/0/0F") > at("b/48/0F"), "stalled media: both wait for the end of A while B flows");
+        ok &= expect(bounded, "stalled media: one timeline Object per held media Object at most");
 
         // The end of the source flushes the held media Object, then its
         // timeline Object.

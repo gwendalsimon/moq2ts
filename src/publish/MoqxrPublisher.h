@@ -21,6 +21,9 @@ class Publisher;
 
 namespace moq2ts {
 
+// The Track Name of the catalog track: MSF -01 Section 5 makes it "catalog".
+inline constexpr char kCatalogTrackName[] = "catalog";
+
 struct PublishedObject {
     QString trackName;
     QByteArray payload;
@@ -37,6 +40,9 @@ struct PublishedObject {
     // True when no later object shares this group (a timeline or catalog
     // object), so the publisher closes the group without looking ahead.
     bool finalInGroup = false;
+    // A marker, never sent: the track named trackName has no more Objects, so
+    // its last Object closes its Group (see ObjectLookahead).
+    bool endsTrack = false;
     // The track this Object describes, which must go out first: a timeline
     // Object records a media Object (MSF -01 Section 7: data about previously
     // published Groups). Empty when it depends on none.
