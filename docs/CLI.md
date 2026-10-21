@@ -64,6 +64,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--video <path>` | - | TS/M2TS source: seekable file, FIFO, or `/dev/stdin` |
 | `--audio <path>` | - | Alternate single-stream TS source path |
 | `--srt-config <path>` | - | SRT ingest: JSON caller config (see below). Takes the place of `--video`, and implies `--unmodified` |
+| `--config <file>` | - | Publish several programs of one live source as per-program tracks, as a JSON configuration states (see "Run: several programs from a JSON configuration"). Takes no other option |
 | `--camera <id>` / `--mic <id>` | - | Capture device ids (instead of a TS source) |
 | `--program <n>` | `0` | Per-program: the MPEG program to carry (0 = first). Unmodified multiplex: the reference program that the catalog names (0 = none) |
 | `--unmodified` | off | Unmodified carriage: forward every source packet unchanged (no PID filter or rewrite). The catalog carries the source PAT and PMT as initialization data. The track is `unmodified-program` for a single-program source and `unmodified-multiplex` otherwise; without a PAT the track is refused |
@@ -259,6 +260,61 @@ ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" \
         --unmodified --video /dev/stdin
 ```
 
+## Run: several programs from a JSON configuration
+
+`--config <file>` publishes several programs of one live multi-program source in
+one MOQT session. Each program becomes the per-program track
+`program-<number>` with its timeline track `program-<number>.timeline`, and one
+catalog lists every track. The file states the relay, the source, and the
+programs, so `--config` takes no other option. `--config` is built on Linux and
+macOS only; a Windows build rejects it.
+
+```json
+{
+  "relay": { "endpoint": "moqt://relay.example:4433", "namespace": "live/mpts", "draft": 22 },
+  "ingest": { "srt": { "mode": "listener", "host": "0.0.0.0", "port": 9000, "latency_ms": 200 } },
+  "programs": [
+    { "number": 101, "mux_rate_bps": 6000000, "si": ["sdt", "eit-pf", "tdt-tot"] },
+    { "number": 102 }
+  ],
+  "segment_bytes": 65536
+}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `relay.endpoint`, `relay.namespace` | required | As `--endpoint` and `--namespace` |
+| `relay.draft` | `22` | As `--draft` |
+| `ingest.srt` | - | SRT ingest: `mode` (`listener` or `caller`, default `listener`), `host` (default `0.0.0.0` for a listener, `127.0.0.1` for a caller), `port` (default 9000), `latency_ms` (default 120), as in the `--srt-config` entry |
+| `ingest.path` | - | A FIFO or a pipe. A seekable file is refused: the tracks are live |
+| `programs[].number` | required | The program number in the PAT, from 1 to 65535, listed once |
+| `programs[].mux_rate_bps` | `0` | `mpeg2tsMuxRate` of the track; 0 works it out from the rate measured at start-up. A value below the measured rate gets a warning: a receiver that pads to it overflows |
+| `programs[].si` | none | The DVB SI tables the track keeps, by the names of `--si` |
+| `segment_bytes` | `65536` | As `--segment-bytes`, from 1 to 1048576 (1 MiB) |
+
+`ingest` holds exactly one of `srt` or `path`. An unknown key is refused. An
+invalid file exits with code 2, and the error names the field and the value. A
+program that ends, or whose read fails, ends its own track; the others go on.
+
+The tracks start at the live edge. While the relay has no subscriber, moq2ts
+keeps reading the source and drops its oldest packets. When the first
+subscriber comes, nothing read before it is published but the catalog: each
+program starts at its next random access point.
+
+Where the source skips ahead, each program starts a new Group at its next random
+access point and drops the packets before it, so every Group of a per-program
+track starts at one and the catalog declares `mpeg2tsRandomAccess`. The first
+packet that carries a PCR in that Group has its `discontinuity_indicator` set
+(MSFTS "PCR and Timing"). The first Group of a track is not marked: no Group
+precedes it.
+
+```bash
+./build/moq2ts-cli --config mpts.json
+```
+
+A mock build accepts only a `mock://` endpoint, so a configuration for
+`./build-mock/moq2ts-cli` sets `"endpoint": "mock://local"`.
+
 ## Receive MPEG-TS from a relay
 
 Build the console receiver against an installed moq5 main build with the
@@ -352,6 +408,14 @@ no longer produced.
   in the source: up to 20,000 packets for the first random access point, and
   up to one second of PCR time to measure the mux rate. On a live source this
   delays the start by up to a few seconds. The packets read are published.
+  With `--config`, each program reads the whole multiplex, so its windows are
+  PCR time whatever the multiplex rate: 1 s for the PAT and the PMT, 10 s for
+  the first random access point, and 1 s for the rate, each within 600,000
+  packets. The programs start together. These scans keep no packet: each
+  track starts at its next random access point after them. A program whose PCR
+  does not advance for about 2 s fails to start, with an error that says so. A
+  program whose PMT names no PCR PID times its windows on the PCR of the
+  multiplex, and fails only when no PCR of the multiplex advances.
 
 - **Live stream = live catalog.** A non-seekable source (FIFO/stdin) is detected
   automatically and advertised as `isLive: true`; VOD duration probing is skipped

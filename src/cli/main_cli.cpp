@@ -35,6 +35,11 @@
 #include "media/LivePipeline.h"
 #include "publish/MoqxrPublisher.h"
 
+#ifdef MOQ2TS_HAS_MPTS
+#include "app/PublisherSpec.h"
+#include "media/MptsPipeline.h"
+#endif
+
 namespace {
 
 // Set from the async signal handler; polled by a QTimer on the Qt thread because a
@@ -123,6 +128,144 @@ private:
 };
 #endif  // MOQ2TS_HAS_SRT
 
+#ifdef MOQ2TS_HAS_MPTS
+// --config: publishes the programs of one live multi-program source as
+// per-program tracks (draft "Per-Program") in one session, as the JSON
+// configuration at path states (see PublisherSpec.h).
+int runConfig(QCoreApplication& app, const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        logLine(stderr, "error", QStringLiteral("Cannot open the configuration %1: %2").arg(path, file.errorString()));
+        return 1;
+    }
+    moq2ts::PublisherSpec spec;
+    QString specError;
+    if (!moq2ts::parsePublisherSpec(file.readAll(), &spec, &specError)) {
+        logLine(stderr, "error", QStringLiteral("%1: %2").arg(path, specError));
+        return 2;
+    }
+    moq2ts::MptsConfig mpts;
+    mpts.sourcePath = spec.sourcePath;
+    mpts.programs = spec.programs;
+    mpts.targetSegmentBytes = spec.segmentBytes;
+
+    const bool useSrt = !spec.srt.mode.isEmpty();
+#ifndef MOQ2TS_HAS_SRT
+    if (useSrt) {
+        logLine(stderr, "error",
+                QStringLiteral("This build has no SRT support (libsrt was not found when it was "
+                               "configured, or the platform is unsupported). Use an \"ingest\" "
+                               "\"path\" (a FIFO) instead."));
+        return 2;
+    }
+#else
+    SrtIngest srtIngest;
+    if (useSrt) {
+        const bool listener = spec.srt.mode == QStringLiteral("listener");
+        moq2ts::SrtSource::Config srtCfg;
+        srtCfg.mode = listener ? moq2ts::SrtSource::Config::Mode::Listener : moq2ts::SrtSource::Config::Mode::Caller;
+        srtCfg.host = spec.srt.host.toStdString();
+        srtCfg.port = static_cast<uint16_t>(spec.srt.port);
+        srtCfg.latencyMs = spec.srt.latencyMs;
+        logLine(stderr, "srt", QStringLiteral("%1 srt://%2:%3 (latency=%4ms)...")
+                                   .arg(listener ? QStringLiteral("Listener: waiting for a caller on")
+                                                 : QStringLiteral("Caller: connecting to"),
+                                        spec.srt.host)
+                                   .arg(spec.srt.port)
+                                   .arg(spec.srt.latencyMs));
+        // Every program starts a Group where the receive thread skipped ahead.
+        auto sourceGaps = std::make_shared<moq2ts::SourceGapLog>();
+        // No resync PID: no one program's PID suits every program, so after a
+        // drop the ring resumes at the newest random access point of any PID,
+        // and each program then drops to its own next random access point.
+        const QString err = srtIngest.start(srtCfg, nullptr, sourceGaps);
+        if (!err.isEmpty()) {
+            logLine(stderr, "error", err);
+            return 1;
+        }
+        mpts.sourcePath = srtIngest.readPath();
+        mpts.sourceGaps = sourceGaps;
+    }
+#endif  // MOQ2TS_HAS_SRT
+
+    moq2ts::MoqxrPublisher publisher;
+    moq2ts::MptsPipeline pipeline;
+    std::atomic<bool> failed{false};
+
+    QObject::connect(&pipeline, &moq2ts::MptsPipeline::status, &app, [](const QString& m) {
+        logLine(stderr, "status", m);
+    });
+    QObject::connect(&pipeline, &moq2ts::MptsPipeline::error, &app, [&failed](const QString& m) {
+        failed.store(true, std::memory_order_release);
+        logLine(stderr, "error", m);
+    });
+    // A read error of one program ends that program's track only; it still
+    // makes the exit code 1.
+    QObject::connect(&pipeline, &moq2ts::MptsPipeline::programEnded, &app, [&failed](int, const QString& m) {
+        failed.store(true, std::memory_order_release);
+        logLine(stderr, "error", m);
+    });
+    QObject::connect(&publisher, &moq2ts::MoqxrPublisher::publishError, &app, [&failed](const QString& m) {
+        failed.store(true, std::memory_order_release);
+        logLine(stderr, "error", m);
+    });
+    QObject::connect(&publisher, &moq2ts::MoqxrPublisher::connectionStateChanged, &app,
+                     [](bool, const QString& m) { logLine(stderr, "conn", m); });
+    // What the library sent, for the line printed at exit (written from the
+    // publish thread, hence direct).
+    auto sentObjects = std::make_shared<std::atomic<int64_t>>(0);
+    auto sentBytes = std::make_shared<std::atomic<int64_t>>(0);
+    QObject::connect(&publisher, &moq2ts::MoqxrPublisher::framePublished, &app,
+                     [sentObjects, sentBytes](const QString&, int64_t bytes, int64_t objects) {
+                         sentBytes->store(bytes, std::memory_order_relaxed);
+                         sentObjects->store(objects, std::memory_order_relaxed);
+                     },
+                     Qt::DirectConnection);
+
+    if (!publisher.connect(spec.relay)) {
+        logLine(stderr, "error", QStringLiteral("Could not open MOQ publish session."));
+        return 1;
+    }
+    pipeline.start(spec.relay, mpts, &publisher);
+
+    // As in main(): poll for SIGINT/SIGTERM and for the end of every program.
+    // Local, so it cannot fire after the pipeline it reads has gone.
+    QTimer poll;
+    poll.setInterval(200);
+    QObject::connect(&poll, &QTimer::timeout, &app, [&]() {
+        if (g_interrupted.load(std::memory_order_acquire)) {
+            logLine(stderr, "status", QStringLiteral("Interrupted; stopping."));
+            app.quit();
+            return;
+        }
+        if (!pipeline.running()) {
+            app.quit();
+        }
+    });
+    poll.start();
+
+    std::signal(SIGINT, handleSignal);
+    std::signal(SIGTERM, handleSignal);
+
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&]() {
+        // The publisher first: it ends a publish that waits for a subscriber,
+        // which MptsPipeline::stop() leaves to its caller.
+        publisher.stop();
+        pipeline.stop();
+#ifdef MOQ2TS_HAS_SRT
+        srtIngest.stop();
+#endif  // MOQ2TS_HAS_SRT
+        std::fprintf(stdout, "[final] sent_objects=%lld sent_bytes=%lld\n",
+                     static_cast<long long>(sentObjects->load(std::memory_order_relaxed)),
+                     static_cast<long long>(sentBytes->load(std::memory_order_relaxed)));
+        std::fflush(stdout);
+    });
+
+    const int rc = app.exec();
+    return (rc != 0 || failed.load(std::memory_order_acquire)) ? 1 : 0;
+}
+#endif  // MOQ2TS_HAS_MPTS
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -205,8 +348,32 @@ int main(int argc, char** argv) {
     //   { "srt_callers": [{ "id": "...", "srt": { "mode": "caller", "host": "...", "port": N, "latency_ms": N } }] }
     addValue(QStringLiteral("srt-config"), QStringLiteral("SRT config JSON file (moqxr-compatible format)."),
              QStringLiteral("path"));
+    addValue(QStringLiteral("config"),
+             QStringLiteral("Publish several programs of one live source as per-program tracks, as this JSON "
+                            "configuration states (relay, ingest, programs). Takes no other option."),
+             QStringLiteral("file"));
 
     parser.process(app);
+
+    // The configuration states the relay, the source, and the programs, so
+    // another option would be ignored or contradict it.
+    if (parser.isSet(QStringLiteral("config"))) {
+        for (const QString& name : parser.optionNames()) {
+            if (name != QStringLiteral("config")) {
+                logLine(stderr, "error", QStringLiteral("--config cannot be combined with --%1.").arg(name));
+                return 2;
+            }
+        }
+#ifdef MOQ2TS_HAS_MPTS
+        return runConfig(app, parser.value(QStringLiteral("config")));
+#else
+        // Built without per-program publishing: the platform is unsupported.
+        logLine(stderr, "error",
+                QStringLiteral("This build has no per-program (--config) support (the platform is "
+                               "unsupported, or MOQ2TS_ENABLE_MPTS was off when it was configured)."));
+        return 2;
+#endif  // MOQ2TS_HAS_MPTS
+    }
 
     moq2ts::PublishConfig cfg;
     cfg.moqEndpoint = parser.value(QStringLiteral("endpoint"));
