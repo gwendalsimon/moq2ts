@@ -5,6 +5,7 @@
 #include <QFile>
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
 #include <vector>
 
@@ -19,6 +20,62 @@ namespace moq2ts {
 
 namespace {
 
+constexpr std::int64_t kPcrHz = 27000000;
+// setTimedStartWindows(): the windows of open() in PCR time, and the packets
+// each may read at most, which hold 10 s of an 80 Mbit/s multiplex.
+constexpr std::int64_t kPsiWindowPcr = 1 * kPcrHz;    // twice the 500 ms PSI limit of ETSI TR 101 290
+constexpr std::int64_t kRapWindowPcr = 10 * kPcrHz;
+constexpr int kTimedWindowMaxPackets = 600000;
+// A window whose PCR does not advance for this long ends with an error: the
+// packets of about 2 s at 80 Mbit/s, or 2 s of wall time on a slower source.
+constexpr int kPcrStallPackets = 100000;
+constexpr auto kPcrStallTime = std::chrono::seconds(2);
+// The largest step between two PCRs of a PID that counts as time: ISO/IEC
+// 13818-1 sends a PCR at least every 100 ms, so a longer step is a jump.
+constexpr std::int64_t kMaxPcrStep = 1 * kPcrHz;
+
+// The PCR time that a run of packets spans, on pid, or on the first PID that
+// carries a PCR when pid is -1, and whether that PCR stopped advancing. A
+// step back, or one over 1 s, is a discontinuity (a looping feed, an encoder
+// restart): it counts as no time, the new PCR is the reference, and it is an
+// advance, since the clock runs. A wrap of the 33-bit base is a small step.
+class PcrSpan {
+public:
+    explicit PcrSpan(int pid) : m_pid(pid), m_lastAdvance(std::chrono::steady_clock::now()) {}
+    void add(int pid, const QByteArray& tsPacket) {
+        ++m_sinceAdvance;
+        if (m_pid >= 0 && pid != m_pid) {
+            return;
+        }
+        const std::int64_t pcr = pcrOf(tsPacket);
+        if (pcr < 0) {
+            return;
+        }
+        constexpr std::int64_t pcrRange = (std::int64_t{1} << 33) * 300;
+        if (m_last >= 0 && pcr != m_last) {
+            const std::int64_t step = (pcr - m_last + pcrRange) % pcrRange;
+            m_elapsed += step <= kMaxPcrStep ? step : 0;
+            m_sinceAdvance = 0;
+            m_lastAdvance = std::chrono::steady_clock::now();
+        }
+        m_last = pcr;
+        m_pid = pid;
+    }
+    std::int64_t elapsed() const { return m_elapsed; }
+    // No PCR, or no new one, for kPcrStallPackets packets or kPcrStallTime.
+    bool stalled() const {
+        return m_sinceAdvance >= kPcrStallPackets ||
+               (m_sinceAdvance % 64 == 0 && std::chrono::steady_clock::now() - m_lastAdvance >= kPcrStallTime);
+    }
+
+private:
+    int m_pid = -1;
+    std::int64_t m_last = -1;
+    std::int64_t m_elapsed = 0;
+    int m_sinceAdvance = 0;
+    std::chrono::steady_clock::time_point m_lastAdvance;
+};
+
 // What made the source skip ahead (SourceGapLog::Cause bits), for a log line.
 QByteArray gapReason(unsigned causes) {
     QList<QByteArray> reasons;
@@ -27,6 +84,9 @@ QByteArray gapReason(unsigned causes) {
     }
     if (causes & SourceGapLog::ProgramQueue) {
         reasons.append("the program's queue overflowed: the track fell behind the source");
+    }
+    if (causes & SourceGapLog::LiveEdge) {
+        reasons.append("what was queued before the publisher's first pull was dropped");
     }
     if (causes & SourceGapLog::SrtNewCaller) {
         reasons.append("a new SRT caller connected: its stream can jump in time and PCR");
@@ -441,6 +501,10 @@ void M2tsPacketizer::setRetainNullPackets(bool retain) {
     m_retainNullPackets = retain;
 }
 
+void M2tsPacketizer::setTimedStartWindows(bool timed) {
+    m_timedStartWindows = timed;
+}
+
 void M2tsPacketizer::setSourceGaps(std::shared_ptr<SourceGapLog> gaps) {
     m_sourceGaps = std::move(gaps);
 }
@@ -491,6 +555,12 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     // single-program source it is the nominal mux rate of the source, which
     // the PCR gives.
     measureRates(!m_transparent && !m_retainNullPackets && m_patProgramCount == 1);
+    if (!m_startError.isEmpty()) {
+        if (error) {
+            *error = m_startError;
+        }
+        return false;
+    }
     // Group boundaries follow the random_access_indicator of the video PID, or
     // of the PCR PID when the PMT lists no video stream. The PCR can travel on
     // a PID of its own, which never carries the indicator.
@@ -511,6 +581,12 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     // is optional, so the track declares random access only if one appears.
     const bool multiplex = m_transparent && m_patProgramCount != 1;
     m_dropLeadIn = m_sequential && (!multiplex || (namesProgram() && m_pcrPid >= 0)) && findRandomAccess();
+    if (!m_startError.isEmpty()) {
+        if (error) {
+            *error = m_startError;
+        }
+        return false;
+    }
     // readObject reads the PSI again from the start, so the assemblers restart.
     // The stored tables stay, so the same tables count as repeats.
     m_patAssembler.reset();
@@ -584,21 +660,39 @@ bool M2tsPacketizer::scanPsi(QString* error) {
         return fail(QStringLiteral("Failed to seek M2TS source while reading the PAT and PMT."));
     }
 
+    // A file, or the source of one program, reads 4096 packets at most. A
+    // program of a live multiplex reads the whole multiplex, so its window is
+    // PCR time.
     constexpr int maxPacketsToScan = 4096;
-    for (int index = 0; index < maxPacketsToScan && !psiComplete(); ++index) {
+    PcrSpan span(-1);
+    const auto inWindow = [&](int index) {
+        return m_timedStartWindows ? index < kTimedWindowMaxPackets && span.elapsed() < kPsiWindowPcr
+                                   : index < maxPacketsToScan;
+    };
+    for (int index = 0; inWindow(index) && !psiComplete(); ++index) {
         const QByteArray sourcePacket = m_device->read(m_packetSize);
         if (sourcePacket.size() != m_packetSize) {
             break;
         }
         // On non-seekable input we cannot rewind after the scan, so retain every
-        // packet consumed here for readObject to replay in order.
-        if (m_sequential) {
+        // packet consumed here for readObject to replay in order. Timed windows
+        // keep none: their track starts at the next random access point, and
+        // the PSI read here is in the tables it parsed.
+        if (m_timedStartWindows) {
+            m_sourceOffset += static_cast<std::uint64_t>(sourcePacket.size());
+        } else if (m_sequential) {
             m_prebuffer += sourcePacket;
         }
         if (!packetHasSync(sourcePacket)) {
             return fail(QStringLiteral("Invalid TS sync byte while reading the PAT and PMT."));
         }
-        handlePsiPacket(tsPacketView(sourcePacket), sourcePacket);
+        const QByteArray tsPacket = tsPacketView(sourcePacket);
+        span.add(pidOf(tsPacket), tsPacket);
+        handlePsiPacket(tsPacket, sourcePacket);
+        if (m_timedStartWindows && !psiComplete() && span.stalled()) {
+            return fail(QStringLiteral("No advancing PCR in the live source while reading the PAT and PMT; the "
+                                       "start-up windows of a program of a multiplex are PCR time."));
+        }
     }
     // Non-seekable sources keep their forward-only position; readObject drains the
     // prebuffer captured above.
@@ -1097,6 +1191,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     }
 
     const int packets = std::max(1, packetsPerObject);
+    std::uint64_t firstOffset = 0;   // of the first packet in payload
     QByteArray payload;
     payload.reserve(packets * m_packetSize);
     // Only a gap leaves a packet carried over.
@@ -1125,7 +1220,9 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // a new Group starts with this packet.
         unsigned causes = 0;
         if (m_sourceGaps && packetOffset > 0 && m_sourceGaps->takeUpTo(packetOffset, &causes)) {
-            restartAfterGap(m_nextObjectId > 0 || !payload.isEmpty());
+            // Nothing before the live edge is published, so the Group there
+            // is the first one.
+            restartAfterGap(!(causes & SourceGapLog::LiveEdge) && (m_nextObjectId > 0 || !payload.isEmpty()));
             if (!payload.isEmpty()) {
                 // The next Object starts with it, and a Group with that Object.
                 // Its causes wait with it: they are not this Object's gap.
@@ -1182,6 +1279,9 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             if (SectionRewriter* rewriter = rewriterFor(pid)) {
                 const QList<QByteArray> rewritten = rewriter->push(
                     tsView, packet, [this, pid](const QByteArray& section) { return rewriteSection(pid, section); });
+                if (payload.isEmpty()) {
+                    firstOffset = packetOffset;
+                }
                 for (const QByteArray& out : rewritten) {
                     payload += out;
                 }
@@ -1208,6 +1308,9 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
                 packet.data()[(m_packetSize == 192 ? 4 : 0) + 5] |= 0x80;
                 m_markDiscontinuity = false;
             }
+        }
+        if (payload.isEmpty()) {
+            firstOffset = packetOffset;
         }
         payload += packet;
     }
@@ -1275,7 +1378,10 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         ++m_currentGroupId;
         m_nextObjectIdInGroup = 0;
     }
-    if (gapStart && m_nextObjectId > 0) {
+    // The live edge at the first pull is the normal start of a track, which
+    // the pipeline reports once. An overflow at the same offset dropped only
+    // what the flush drops anyway, so it is not reported either.
+    if (gapStart && m_nextObjectId > 0 && !(m_gapCauses & SourceGapLog::LiveEdge)) {
         qWarning("The source skipped ahead (%s): Group %llu starts where it resumed%s.",
                  gapReason(m_gapCauses).constData(), static_cast<unsigned long long>(m_currentGroupId),
                  rapDetected ? "" : ", which is not a random access point of the group PID");
@@ -1299,6 +1405,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     }
 
     object->payload = std::move(payload);
+    object->sourceOffset = firstOffset;
     object->groupId = m_currentGroupId;
     object->objectId = m_nextObjectIdInGroup++;
     object->startsGroup = rapDetected || gapStart;
@@ -1363,6 +1470,10 @@ void M2tsPacketizer::skipToFirstGap() {
     m_sourceGaps->takeUpTo(m_sourceOffset, &causes);
     // The track starts here: no Group precedes this one.
     restartAfterGap(false);
+    // The live edge, and an overflow at its offset, as in readObject.
+    if (causes & SourceGapLog::LiveEdge) {
+        return;
+    }
     const double seconds = m_measuredBitrate > 0 ? static_cast<double>(skipped) * 8 / m_measuredBitrate : 0;
     qWarning("The source skipped ahead before the first Object (%s): %llu bytes read before the gap (about "
              "%.1f s) are not published, and the track starts where the source resumed.",
@@ -1396,6 +1507,13 @@ QByteArray M2tsPacketizer::lookAheadPacket(qsizetype offset) {
     if (!m_sequential) {
         return m_device->read(m_packetSize);
     }
+    // Timed windows keep no packet: each scan reads on from where the last
+    // one stopped, and the track starts at the next random access point.
+    if (m_timedStartWindows) {
+        const QByteArray packet = m_device->read(m_packetSize);
+        m_sourceOffset += static_cast<std::uint64_t>(packet.size());
+        return packet;
+    }
     while (offset + m_packetSize > m_prebuffer.size()) {
         const QByteArray packet = m_device->read(m_packetSize);
         if (packet.size() != m_packetSize) {
@@ -1408,9 +1526,11 @@ QByteArray M2tsPacketizer::lookAheadPacket(qsizetype offset) {
 
 bool M2tsPacketizer::findRandomAccess() {
     // Looks ahead on a live source, up to 20,000 packets (about 2 seconds at
-    // 10 Mbit/s), for the first random access point. The packets read stay in
-    // the prebuffer, so readObject still publishes them in order.
-    constexpr int maxPackets = 20000;
+    // 10 Mbit/s), or with timed windows 10 s of PCR time, for the first random
+    // access point. The packets read stay in the prebuffer, so readObject
+    // still publishes them in order.
+    const int maxPackets = m_timedStartWindows ? kTimedWindowMaxPackets : 20000;
+    PcrSpan span(m_pcrPid);
     const int savedRapPid = m_rapPid;
     for (qsizetype offset = 0; offset < qsizetype{maxPackets} * m_packetSize; offset += m_packetSize) {
         const QByteArray packet = lookAheadPacket(offset);
@@ -1418,13 +1538,31 @@ bool M2tsPacketizer::findRandomAccess() {
             break;
         }
         const QByteArray tsPacket = tsPacketView(packet);
-        if (startsRandomAccess(pidOf(tsPacket), tsPacket)) {
+        const int pid = pidOf(tsPacket);
+        if (startsRandomAccess(pid, tsPacket)) {
             return true;
+        }
+        if (m_timedStartWindows) {
+            span.add(pid, tsPacket);
+            if (span.elapsed() >= kRapWindowPcr) {
+                break;
+            }
+            if (span.stalled()) {
+                m_rapPid = savedRapPid;
+                m_startError = noPcrError();
+                return false;
+            }
         }
     }
     m_rapPid = savedRapPid;
-    qWarning("No random_access_indicator within the first %d packets of the live source; the track "
-             "starts at its first packet and does not declare mpeg2tsRandomAccess.", maxPackets);
+    if (m_timedStartWindows) {
+        qWarning("No random_access_indicator within the first %lld s of the live source; the track starts at "
+                 "its first packet and does not declare mpeg2tsRandomAccess.",
+                 static_cast<long long>(kRapWindowPcr / kPcrHz));
+    } else {
+        qWarning("No random_access_indicator within the first %d packets of the live source; the track "
+                 "starts at its first packet and does not declare mpeg2tsRandomAccess.", maxPackets);
+    }
     return false;
 }
 
@@ -1435,8 +1573,9 @@ void M2tsPacketizer::measureRates(bool muxRate) {
     // track carries, at their source size, for the bitrate. A non-seekable
     // source keeps the packets read in the prebuffer, so readObject still sees
     // them.
-    constexpr int maxPackets = 20000;
-    constexpr std::int64_t pcrHz = 27000000;
+    // Timed windows read up to 1 s of PCR time, whatever the packet rate.
+    const int maxPackets = m_timedStartWindows ? kTimedWindowMaxPackets : 20000;
+    constexpr std::int64_t pcrHz = kPcrHz;
     constexpr std::int64_t pcrRange = (std::int64_t{1} << 33) * 300;
     m_muxRateNote.clear();
     if (muxRate && m_pcrPid < 0) {
@@ -1458,6 +1597,8 @@ void M2tsPacketizer::measureRates(bool muxRate) {
     std::vector<int> carried;
     carried.reserve(4096);
     carried.push_back(0);
+    // Without a PCR PID (0x1FFF), the window runs on any PCR of the multiplex.
+    PcrSpan span(m_pcrPid);
     for (int index = 0; index < maxPackets && elapsed < pcrHz; ++index) {
         const QByteArray packet = lookAheadPacket(qsizetype{index} * m_packetSize);
         if (packet.size() != m_packetSize || !packetHasSync(packet)) {
@@ -1465,6 +1606,13 @@ void M2tsPacketizer::measureRates(bool muxRate) {
         }
         const QByteArray tsPacket = tsPacketView(packet);
         const int pid = pidOf(tsPacket);
+        if (m_timedStartWindows) {
+            span.add(pid, tsPacket);
+            if (span.stalled()) {
+                m_startError = noPcrError();
+                return;
+            }
+        }
         nullPackets += pid == 0x1FFF ? 1 : 0;
         const bool kept = m_transparent || m_selectedPids.test(static_cast<std::size_t>(pid)) ||
                           (m_retainNullPackets && pid == 0x1FFF);
@@ -1479,11 +1627,18 @@ void M2tsPacketizer::measureRates(bool muxRate) {
         if (pcr < 0) {
             continue;
         }
-        if (firstPcr < 0) {
+        const std::int64_t step = firstPcr < 0 ? 0 : (pcr - lastPcr + pcrRange) % pcrRange;
+        // Timed windows: a step back, or one over 1 s, is a discontinuity, as
+        // in PcrSpan. The measure starts again from it, since the rate becomes
+        // the program's mpeg2tsMuxRate (MSFTS 6.7), and so does the count of
+        // null packets that tells a CBR source.
+        if (firstPcr < 0 || (m_timedStartWindows && step > kMaxPcrStep)) {
+            nullPackets = firstPcr < 0 ? nullPackets : 0;
             firstPcr = pcr;
             firstIndex = index;
+            elapsed = 0;
         } else {
-            elapsed += (pcr - lastPcr + pcrRange) % pcrRange;
+            elapsed += step;
         }
         lastPcr = pcr;
         lastIndex = index;
@@ -1595,6 +1750,20 @@ int M2tsPacketizer::patProgramCount() const {
 
 QByteArray M2tsPacketizer::initData() const {
     return m_initData;
+}
+
+QString M2tsPacketizer::noPcrError() const {
+    return m_pcrPid < 0 ? QStringLiteral("No advancing PCR in the live source, whose program %1 names no PCR PID; "
+                                         "the start-up windows of a program of a multiplex are PCR time.")
+                              .arg(m_programNumber)
+                        : QStringLiteral("No advancing PCR on PID %1 of program %2 in the live source; the start-up "
+                                         "windows of a program of a multiplex are PCR time.")
+                              .arg(m_pcrPid)
+                              .arg(m_programNumber);
+}
+
+qsizetype M2tsPacketizer::prebufferedBytes() const {
+    return m_prebuffer.size() - m_prebufferPos;
 }
 
 std::uint64_t M2tsPacketizer::objectsRead() const {

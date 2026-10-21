@@ -10,13 +10,19 @@
 #include <QtGlobal>
 #include <QTemporaryDir>
 
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <csignal>
 
 #include <cstdint>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
+#include <atomic>
 
 using moq2ts::M2tsObject;
 using moq2ts::M2tsPacketizer;
@@ -140,7 +146,45 @@ LiveRun publishLive(const QString& fifo, const QByteArray& data, bool transparen
 }
 }  // namespace
 
+// Opens a live FIFO that carries ts with timed start-up windows, as a program
+// of a multiplex does. Returns whether it opened, and fills randomAccess and,
+// when given, the measured bitrate and mux rate.
+bool timedOpen(const QString& fifo, const QByteArray& ts, int program, bool* randomAccess, QString* error,
+               qint64* measuredBitrate = nullptr, qint64* measuredMuxRate = nullptr) {
+    ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+    std::thread writer([&] {
+        const int fd = ::open(fifo.toLocal8Bit().constData(), O_WRONLY);
+        if (fd >= 0) {
+            qsizetype done = 0;
+            while (done < ts.size()) {
+                const ssize_t n = ::write(fd, ts.constData() + done, ts.size() - done);
+                if (n <= 0) {
+                    break;
+                }
+                done += n;
+            }
+            ::close(fd);
+        }
+    });
+    bool opened = false;
+    {
+        M2tsPacketizer packetizer(fifo);
+        packetizer.setTimedStartWindows(true);
+        opened = packetizer.open(program, error);
+        *randomAccess = opened && packetizer.randomAccess();
+        if (measuredBitrate) {
+            *measuredBitrate = packetizer.measuredBitrate();
+        }
+        if (measuredMuxRate) {
+            *measuredMuxRate = packetizer.measuredMuxRate();
+        }
+    }
+    writer.join();
+    return opened;
+}
+
 int main() {
+    std::signal(SIGPIPE, SIG_IGN);
     bool ok = true;
     QTemporaryDir dir;
     ok &= expect(dir.isValid(), "temporary directory");
@@ -776,6 +820,43 @@ int main() {
                      "bitrate: not constant without null packets");
         ok &= expect(!constant("const-p.ts", stream({{1, 0x1000}}, 100, 3, 3000), false),
                      "bitrate: not constant for a per-program track, which drops the null packets");
+
+        // A per-program track of a 2-program stream measures its own program's
+        // packets, not the multiplex. Packets 0..2 are the PAT and the two PMTs;
+        // from packet 3, every 4th packet is program 1 (PID 0x100, which also
+        // carries the PCR every 100 packets) and the others are program 2
+        // (PID 0x200). At 2,000 packets/s (13,500 ticks each), the window
+        // from the PCR at packet 100 to the one at packet 2100 is exactly 1 s
+        // and holds 2,000 packets, 500 of them program 1: 500 * 188 * 8 =
+        // 752,000 bit/s, against 2,000 * 188 * 8 = 3,008,000 bit/s for the
+        // multiplex.
+        {
+            QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
+            ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+            ts += tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}}));
+            int cc1 = 0;
+            int cc2 = 0;
+            for (int index = 3; index < 3000; ++index) {
+                if (index % 100 == 0) {
+                    ts += pcrPacket(0x100, static_cast<std::int64_t>(index) * 13500, cc1++);
+                } else if (index % 4 == 0) {
+                    ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), cc1++);
+                } else {
+                    ts += tb::tsPacket(0x200, false, QByteArray(184, char(0)), cc2++);
+                }
+            }
+            const QString path = dir.filePath("rate-2prog.ts");
+            writeFile(path, ts);
+            const auto programRate = [&](int program) {
+                M2tsPacketizer packetizer(path);
+                QString error;
+                packetizer.open(program, &error);
+                return packetizer.measuredBitrate();
+            };
+            ok &= expect(programRate(1) == 752000,
+                         "bitrate: per-program track of a 2-program stream is the program's rate, not the multiplex rate (" +
+                             std::to_string(programRate(1)) + ")");
+        }
     }
 
     // Source gaps (SRT ingest): no PCR discontinuity within a Group (draft "PCR
@@ -801,9 +882,10 @@ int main() {
             bool randomAccess = false;
         };
         // gapBeforeFirst: the gap is known at open(); otherwise it is recorded
-        // once the first Object is out.
+        // once the first Object is out. A queue overflow at laterOffset, when
+        // given, is recorded with it.
         const auto run = [&](const QString& name, bool gapBeforeFirst, std::uint64_t offset,
-                             unsigned cause = SourceGapLog::SrtReceiveBuffer) {
+                             unsigned cause = SourceGapLog::SrtReceiveBuffer, std::uint64_t laterOffset = 0) {
             GapRun result;
             const QString fifo = dir.filePath(name);
             ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
@@ -814,6 +896,7 @@ int main() {
             packetizer.setSourceGaps(gaps);
             if (gapBeforeFirst) {
                 gaps->record(offset, cause);
+                gaps->record(laterOffset, SourceGapLog::ProgramQueue);
             }
             if (packetizer.open(0, &result.error)) {
                 result.randomAccess = packetizer.randomAccess();
@@ -822,6 +905,7 @@ int main() {
                     result.objects.append(object);
                     if (!gapBeforeFirst && result.objects.size() == 1) {
                         gaps->record(offset, cause);
+                        gaps->record(laterOffset, SourceGapLog::ProgramQueue);
                     }
                 }
             }
@@ -871,6 +955,32 @@ int main() {
         ok &= expect(queueWarnings.filter("queue").size() == 1 && queueWarnings.filter("SRT").isEmpty(),
                      "gap warning: a queue overflow names the program's queue, not SRT: " +
                          queueWarnings.join(" | ").toStdString());
+
+        // The live-edge flush at the first pull is the normal start of a track.
+        // An overflow at its offset only dropped what the flush drops anyway,
+        // so neither the gap before the first Object nor a later one warns. An
+        // overflow at another offset still warns, and names only the queue.
+        constexpr unsigned edgeAndQueue = SourceGapLog::LiveEdge | SourceGapLog::ProgramQueue;
+        for (const bool gapBeforeFirst : {true, false}) {
+            const std::string where = gapBeforeFirst ? "before the first Object" : "after the first Object";
+            warnings().clear();
+            qInstallMessageHandler(captureWarning);
+            run(gapBeforeFirst ? "gap-edge-first.fifo" : "gap-edge-mid.fifo", gapBeforeFirst, gapOffset, edgeAndQueue);
+            const QStringList edgeWarnings = warnings();
+            warnings().clear();
+            run(gapBeforeFirst ? "gap-edge-later-first.fifo" : "gap-edge-later-mid.fifo", gapBeforeFirst, gapOffset,
+                edgeAndQueue, 8 * 188);
+            const QStringList laterWarnings = warnings();
+            qInstallMessageHandler(nullptr);
+            ok &= expect(edgeWarnings.filter("skipped ahead").isEmpty(),
+                         "live edge with an overflow at its offset, " + where + ": no warning: " +
+                             edgeWarnings.join(" | ").toStdString());
+            ok &= expect(laterWarnings.filter("skipped ahead").size() == 1 &&
+                             laterWarnings.filter("queue overflowed").size() == 1 &&
+                             laterWarnings.filter("first pull").isEmpty(),
+                         "live edge, then an overflow at another offset, " + where +
+                             ": one warning, for the queue: " + laterWarnings.join(" | ").toStdString());
+        }
 
         const GapRun none = run("gap-zero.fifo", true, 0);
         ok &= expect(none.error.isEmpty() && none.objects.size() == 3 &&
@@ -922,6 +1032,176 @@ int main() {
             unchanged = unchanged && packet.size() == 188 && packet[4] == char(0x00) && packet[5] == char(0x00);
         }
         ok &= expect(unchanged, "PCR_PID 0: the rewritten PAT packets keep pointer_field 0 and table_id 0");
+    }
+
+    // Timed start-up windows on a live source keep no media: a program whose
+    // PCR PID carries no PCR ends its start-up promptly, with an error that
+    // says so, after reading a bounded number of packets and keeping none.
+    {
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray body;
+        for (int i = 0; i < 1000; ++i) {
+            body += video;
+        }
+        const QString fifo = dir.filePath("no-pcr.fifo");
+        ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+        std::atomic<bool> done{false};
+        std::thread writer([&] {
+            const int fd = ::open(fifo.toLocal8Bit().constData(), O_WRONLY);
+            if (fd < 0) {
+                return;
+            }
+            bool open = ::write(fd, ts.constData(), ts.size()) == ts.size();
+            // Up to 400,000 packets, more than any window reads.
+            for (int i = 0; open && !done && i < 400; ++i) {
+                open = ::write(fd, body.constData(), body.size()) == body.size();
+            }
+            ::close(fd);
+        });
+        auto packetizer = std::make_unique<M2tsPacketizer>(fifo);
+        packetizer->setTimedStartWindows(true);
+        QString error;
+        const auto begin = std::chrono::steady_clock::now();
+        const bool opened = packetizer->open(1, &error);
+        const auto took = std::chrono::steady_clock::now() - begin;
+        const qsizetype kept = packetizer->prebufferedBytes();
+        done = true;
+        packetizer.reset();   // closes the FIFO, which ends the writer
+        writer.join();
+        ok &= expect(!opened && error.contains(QLatin1String("PCR")),
+                     "timed windows, no PCR: start-up fails and says why: " + error.toStdString());
+        ok &= expect(took < std::chrono::seconds(10), "timed windows, no PCR: start-up ends promptly");
+        ok &= expect(kept == 0, "timed windows: the scans keep no packet (" + std::to_string(kept) + " bytes)");
+    }
+
+    // Timed windows across PCR discontinuities, as a looping feed or an
+    // encoder restart gives: the PCR steps back at the start, before the PSI,
+    // jumps ahead in the rate window (1 s, measured again from the jump at
+    // 1 s, so it ends at 2 s), and jumps ahead and back before the first
+    // random access point. A step back, or one over 1 s, counts as no time,
+    // so the windows still find the PSI (at 0.4 s) and the random access
+    // point (at 4 s).
+    {
+        const auto pcrAt = [](double t) {
+            const double clock = t < 1.0 ? t : t < 3.0 ? t + 100 : t < 3.5 ? t + 200 : t + 150;
+            return static_cast<std::int64_t>(clock * 27e6);
+        };
+        QByteArray ts;
+        int cc = 0;
+        for (int k = 0; k < 3; ++k) {
+            ts += pcrPacket(0x100, static_cast<std::int64_t>((25.0 + 0.04 * k) * 27e6), cc++);   // before the loop
+        }
+        for (int slot = 0; slot < 125; ++slot) {
+            const double t = slot * 0.04;
+            if (slot == 10) {
+                ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+                ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+            }
+            ts += pcrPacket(0x100, pcrAt(t), cc++);
+            if (slot == 100) {
+                ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(360000), cc++, 0x40);
+            }
+            ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), cc++);
+        }
+        bool randomAccess = false;
+        QString error;
+        const bool opened = timedOpen(dir.filePath("pcr-jumps.fifo"), ts, 1, &randomAccess, &error);
+        ok &= expect(opened, "timed windows, PCR jumps: the PSI window finds the PAT and PMT: " + error.toStdString());
+        ok &= expect(randomAccess, "timed windows, PCR jumps: the random access window finds the RAP");
+    }
+
+    // A program whose PMT names no PCR PID (0x1FFF, which ISO/IEC 13818-1
+    // allows) times its windows on the PCR of another program of the
+    // multiplex, and starts.
+    {
+        QByteArray ts;
+        int cc = 0;
+        for (int slot = 0; slot < 75; ++slot) {
+            if (slot % 10 == 0) {
+                ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
+                ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x1FFF, {{0x1B, 0x100}}));
+                ts += tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}}));
+            }
+            ts += pcrPacket(0x200, static_cast<std::int64_t>(slot * 0.04 * 27e6), slot);
+            if (slot == 45) {   // after the 1 s rate window
+                ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(162000), cc++, 0x40);
+            }
+            ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), cc++);
+        }
+        bool randomAccess = false;
+        QString error;
+        const bool opened = timedOpen(dir.filePath("no-pcr-pid.fifo"), ts, 1, &randomAccess, &error);
+        ok &= expect(opened, "timed windows, no PCR PID: the program starts: " + error.toStdString());
+        ok &= expect(randomAccess, "timed windows, no PCR PID: the random access window finds the RAP");
+    }
+
+    // A PCR jump inside the rate window of a program of a multiplex: the rate
+    // is measured from the jump on, so it stays the program's true rate,
+    // which becomes its mpeg2tsMuxRate (MSFTS 6.7). Every 40 ms, program 1
+    // sends a PCR and nine video packets, and every 400 ms its PAT and PMT:
+    // (250 + 5) packets/s of 188 octets, 383,520 bit/s. Both PCRs jump 100 s
+    // ahead at 0.5 s, after the PSI window and inside the 1 s rate window.
+    {
+        QByteArray ts;
+        int cc1 = 0;
+        int cc2 = 0;
+        for (int slot = 0; slot < 75; ++slot) {
+            const double t = slot * 0.04 + (slot >= 13 ? 100.0 : 0.0);
+            if (slot % 10 == 0) {
+                ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
+                ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+                ts += tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}}));
+            }
+            ts += pcrPacket(0x100, static_cast<std::int64_t>(t * 27e6), cc1++);
+            for (int k = 0; k < 9; ++k) {
+                ts += tb::tsPacket(0x100, false, QByteArray(184, char(k)), cc1++);
+            }
+            ts += pcrPacket(0x200, static_cast<std::int64_t>(t * 27e6), cc2++);
+            for (int k = 0; k < 4; ++k) {
+                ts += tb::tsPacket(0x200, false, QByteArray(184, char(k)), cc2++);
+            }
+        }
+        bool randomAccess = false;
+        QString error;
+        qint64 rate = 0;
+        const bool opened = timedOpen(dir.filePath("rate-jump.fifo"), ts, 1, &randomAccess, &error, &rate);
+        ok &= expect(opened, "timed windows, PCR jump in the rate window: opens: " + error.toStdString());
+        ok &= expect(rate > 383520 * 97 / 100 && rate < 383520 * 103 / 100,
+                     "timed windows, PCR jump in the rate window: the rate is within 3% of 383,520 bit/s (" +
+                         std::to_string(rate) + ")");
+    }
+
+    // The null packets count from the PCR jump on too: a one-program source
+    // with null stuffing before the jump only is VBR in the window that
+    // measures it, so it gives no mux rate.
+    {
+        QByteArray ts;
+        int cc = 0;
+        for (int slot = 0; slot < 75; ++slot) {
+            const double t = slot * 0.04 + (slot >= 13 ? 100.0 : 0.0);
+            if (slot % 10 == 0) {
+                ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+                ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+            }
+            ts += pcrPacket(0x100, static_cast<std::int64_t>(t * 27e6), cc++);
+            for (int k = 0; k < 9; ++k) {
+                ts += tb::tsPacket(0x100, false, QByteArray(184, char(k)), cc++);
+            }
+            if (slot < 13) {
+                ts += tb::tsPacket(0x1FFF, false, QByteArray(184, char(0xFF))) +
+                      tb::tsPacket(0x1FFF, false, QByteArray(184, char(0xFF)));
+            }
+        }
+        bool randomAccess = false;
+        QString error;
+        qint64 muxRate = -1;
+        const bool opened =
+            timedOpen(dir.filePath("rate-jump-nulls.fifo"), ts, 1, &randomAccess, &error, nullptr, &muxRate);
+        ok &= expect(opened, "timed windows, nulls before a PCR jump: opens: " + error.toStdString());
+        ok &= expect(muxRate == 0, "timed windows, nulls before a PCR jump only: no mux rate (" +
+                                       std::to_string(muxRate) + ")");
     }
 
     // A multiplex without a reference program goes on when the program whose
