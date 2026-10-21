@@ -14,44 +14,16 @@
 
 namespace moq2ts {
 
-namespace {
-
 std::uint64_t nowUnixUs() {
     const auto now = std::chrono::system_clock::now().time_since_epoch();
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
 }
 
+namespace {
+
 // Latency slack (us) before an object is considered due. Small so steady-state
 // latency stays near zero; only objects arriving ahead of their media time wait.
 constexpr std::int64_t kPaceSlackUs = 8000;
-
-// Adds the record of a media Group and returns Object 0 of the timeline Group
-// of the same number, which holds every accessible record (MSF -01 Section
-// 7.3). The history has no bound yet (moq-wg/msf#205). The Object names the
-// media track as its afterTrack, so the publisher sends it after the media
-// Object it records.
-PublishedObject timelineObject(PublishState* st,
-                               const QString& timelineTrackName,
-                               const PublishedObject& media,
-                               std::uint64_t mediaTimeUs,
-                               std::uint64_t wallClockUnixUs) {
-    if (!st->timelineRecords.isEmpty()) {
-        st->timelineRecords += ',';
-    }
-    st->timelineRecords += MsftsMuxer::mediaTimelineRecord(mediaTimeUs, media.groupId, media.objectId, wallClockUnixUs);
-    st->timelineGroupId = media.groupId;
-
-    PublishedObject timeline;
-    timeline.trackName = timelineTrackName;
-    timeline.payload = '[' + st->timelineRecords + ']';
-    timeline.groupId = media.groupId;
-    timeline.objectId = 0;
-    timeline.finalInGroup = true;
-    timeline.mediaTimeUs = media.mediaTimeUs;
-    timeline.mediaDurationUs = 0;
-    timeline.afterTrack = media.trackName;
-    return timeline;
-}
 
 // The MSF bitrate of a TS-source track (MSF -01 Section 5.2.22): its maximum
 // bitrate, which MUST be given for a video track. A TS source is not encoded
@@ -94,7 +66,7 @@ PublishedObject updateCatalog(PublishState* st, const QByteArray& initData) {
         st->catalog.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
     }
     PublishedObject catalog;
-    catalog.trackName = QStringLiteral("catalog");
+    catalog.trackName = QLatin1String(kCatalogTrackName);
     catalog.payload = MsftsMuxer::catalogJson(st->catalog);
     catalog.groupId = ++st->catalogGroupId;
     catalog.objectId = 0;
@@ -104,6 +76,48 @@ PublishedObject updateCatalog(PublishState* st, const QByteArray& initData) {
 }
 
 } // namespace
+
+PublishedObject timelineObject(TimelineHistory* history,
+                               const QString& timelineTrackName,
+                               const PublishedObject& media,
+                               std::uint64_t mediaTimeUs,
+                               std::uint64_t wallClockUnixUs) {
+    if (!history->records.isEmpty()) {
+        history->records += ',';
+    }
+    history->records += MsftsMuxer::mediaTimelineRecord(mediaTimeUs, media.groupId, media.objectId, wallClockUnixUs);
+    history->lastGroupId = media.groupId;
+
+    PublishedObject timeline;
+    timeline.trackName = timelineTrackName;
+    timeline.payload = '[' + history->records + ']';
+    timeline.groupId = media.groupId;
+    timeline.objectId = 0;
+    timeline.finalInGroup = true;
+    timeline.mediaTimeUs = media.mediaTimeUs;
+    timeline.mediaDurationUs = 0;
+    timeline.afterTrack = media.trackName;
+    return timeline;
+}
+
+MsftsCatalog packetizerCatalog(const M2tsPacketizer& packetizer, MsftsCatalog entry) {
+    entry.packetSize = packetizer.packetSize();
+    entry.programNumber = packetizer.programNumber();
+    // A multiplex names a reference program only when --program gives one;
+    // the catalog then carries no program fields.
+    entry.pcrPid = packetizer.namesProgram() ? packetizer.pcrPid() : -1;
+    // Advertised as mpeg2tsSiPids. Empty unless SI retention kept DVB SI PIDs
+    // alongside the selected program, which is exactly the case the field
+    // describes: tables retained in the filtered track beyond the PMT's list.
+    entry.siPids = packetizer.retainedSiPids();
+    // For 192-octet source packets the timestamp prefix is carried without
+    // specified semantics ("opaque", draft-gregoire-moq-msfts); omitted for 188.
+    entry.timestampMode = packetizer.packetSize() == 192 ? QStringLiteral("opaque") : QString();
+    entry.initData = packetizer.initData();
+    entry.timelineTrack = entry.track + QStringLiteral(".timeline");
+    entry.randomAccess = packetizer.randomAccess();
+    return entry;
+}
 
 LivePipeline::LivePipeline(QObject* parent)
     : QObject(parent) {}
@@ -274,8 +288,8 @@ void LivePipeline::runLoop() {
             published.mediaDurationUs = static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
             // One timeline record per media Group, for its first Object that
             // starts a video PES, with that PES's PTS (MSF 7.1.1).
-            if (object.ptsUs.has_value() && st->timelineGroupId != published.groupId) {
-                st->pending.push_back(timelineObject(st.get(), timelineTrackName, published,
+            if (object.ptsUs.has_value() && st->timeline.lastGroupId != published.groupId) {
+                st->pending.push_back(timelineObject(&st->timeline, timelineTrackName, published,
                                                      *object.ptsUs, nowUnixUs()));
             }
             ++st->objects;
@@ -351,33 +365,16 @@ void LivePipeline::runLoop() {
     // pipe a second time.
     const bool liveStream = packetizer.sequential();
     const qint64 fileDurationMs = liveStream ? 0 : M2tsPacketizer::probeDurationMs(sourcePath);
-    MsftsCatalog catalogSpec{
+    MsftsCatalog catalogSpec = packetizerCatalog(packetizer, {
         .track = trackName,
-        .packetSize = packetizer.packetSize(),
         .packetsPerObject = packetsPerObject,
-        .programNumber = packetizer.programNumber(),
-        // A multiplex names a reference program only when --program gives one;
-        // the catalog then carries no program fields.
-        .pcrPid = packetizer.namesProgram() ? packetizer.pcrPid() : -1,
-        // Advertised as mpeg2tsSiPids. Empty unless --retain-si kept the DVB SI
-        // PIDs alongside the selected program, which is exactly the case the
-        // field describes: tables retained in the filtered track beyond the
-        // PMT's list.
-        .siPids = packetizer.retainedSiPids(),
-        // For 192-octet source packets the timestamp prefix is carried without
-        // specified semantics ("opaque", draft-gregoire-moq-msfts); omitted for
-        // 188.
-        .timestampMode = packetizer.packetSize() == 192 ? QStringLiteral("opaque") : QString(),
-        .initData = packetizer.initData(),
-        .timelineTrack = timelineTrackName,
         .trackDurationMs = fileDurationMs,
-        .randomAccess = packetizer.randomAccess(),
         .mode = mode,
         .mpeg2tsMuxRateBps = m_config.mpeg2tsMuxRateBps > 0 ? m_config.mpeg2tsMuxRateBps : packetizer.measuredMuxRate(),
         .isLive = false,
         .bitrateBps = trackMaxBitrate(packetizer, m_config),
         // generatedAt is suppressed for VOD by catalogJson (isLive false).
-    };
+    });
     if (liveStream) {
         // Live pipe feed: mark the track live (VOD duration does not apply).
         catalogSpec.isLive = true;
@@ -465,9 +462,9 @@ void LivePipeline::runLoop() {
         // One timeline record per media Group, for its first Object that starts
         // a video PES: MSF 7.1.1 gives the record the PTS of the first media
         // sample in the Object. mediaTimeUs above stays the pacing clock.
-        if (object.ptsUs.has_value() && st->timelineGroupId != published.groupId) {
+        if (object.ptsUs.has_value() && st->timeline.lastGroupId != published.groupId) {
             // MSF 7.1.1: the wallclock time SHOULD be 0 for a VOD asset.
-            st->pending.push_back(timelineObject(st.get(), timelineTrackName, published,
+            st->pending.push_back(timelineObject(&st->timeline, timelineTrackName, published,
                                                  *object.ptsUs, liveStream ? nowUnixUs() : 0));
         }
         ++st->objects;

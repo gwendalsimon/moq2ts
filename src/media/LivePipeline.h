@@ -18,6 +18,13 @@
 
 namespace moq2ts {
 
+// MSF media timeline history of a track (draft-ietf-moq-msf-01 Section 7.3):
+// every record so far, comma-separated, and the last media Group recorded.
+struct TimelineHistory {
+    QByteArray records;
+    std::optional<std::uint64_t> lastGroupId;
+};
+
 // State the nextObject lambda mutates while publishing.
 //
 // This is heap-allocated and captured BY VALUE (as a shared_ptr) rather than left on
@@ -33,10 +40,7 @@ namespace moq2ts {
 struct PublishState {
     std::int64_t objects = 0;
     std::int64_t bytes = 0;
-    // MSF media timeline history (draft-ietf-moq-msf-01 Section 7.3): every
-    // record so far, comma-separated, and the last media Group recorded.
-    QByteArray timelineRecords;
-    std::optional<std::uint64_t> timelineGroupId;
+    TimelineHistory timeline;
     std::int64_t pacingStartUs = -1;
     // --paced follows the PCR of the source once it has shown one; before that
     // (or without one) it falls back to fragment-duration steps.
@@ -50,6 +54,28 @@ struct PublishState {
     std::shared_ptr<M2tsPacketizer> packetizer;   // file / SRT path
     std::shared_ptr<void> capture;                // capture path (LibavCaptureSource)
 };
+
+// Adds the record of a media Group to history and returns Object 0 of the
+// timeline Group of the same number, which holds every accessible record (MSF
+// -01 Section 7.3). The history has no bound yet (moq-wg/msf#205). The Object
+// names the media track as its afterTrack, so the publisher sends it after the
+// media Object it records.
+PublishedObject timelineObject(TimelineHistory* history,
+                               const QString& timelineTrackName,
+                               const PublishedObject& media,
+                               std::uint64_t mediaTimeUs,
+                               std::uint64_t wallClockUnixUs);
+
+// The wall clock, in microseconds since the Unix epoch, for the records of a
+// live track.
+std::uint64_t nowUnixUs();
+
+// Completes the catalog entry of a track read by packetizer with the fields
+// the stream gives: packet size, program, PCR PID, SI PIDs, timestamp mode,
+// initData, random access, and the timeline track <track>.timeline. entry
+// carries the fields that depend on the pipeline: track, packetsPerObject,
+// mode, rate, bitrate, liveness, and duration.
+MsftsCatalog packetizerCatalog(const M2tsPacketizer& packetizer, MsftsCatalog entry);
 
 class LivePipeline final : public QObject {
     Q_OBJECT

@@ -32,8 +32,10 @@ grep -q 'MOQ2TS_HAVE_LIBAV_CAPTURE' "$PKT" \
   || fail "probeDurationMs must be guarded by MOQ2TS_HAVE_LIBAV_CAPTURE"
 
 # Pipeline marks file path VOD and capture path live.
-grep -q '.randomAccess = packetizer.randomAccess(),' "$PIPE" \
+grep -q 'randomAccess = packetizer\.randomAccess();' "$PIPE" \
   || fail "file path must take randomAccess from the packetizer"
+grep -q 'MsftsCatalog catalogSpec = packetizerCatalog(packetizer,' "$PIPE" \
+  || fail "file path must build its catalog entry with packetizerCatalog"
 # The file path sources trackDurationMs from the probe. The probe is skipped for
 # non-seekable live streams (which would consume the pipe a second time), so the
 # invocation may be guarded - assert the probe call is still wired.

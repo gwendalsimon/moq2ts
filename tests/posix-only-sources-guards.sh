@@ -15,6 +15,7 @@ fail() { printf '%s\n' "$1" >&2; exit 1; }
 UNIX_ONLY=(
   src/media/SrtSource.cpp
   src/media/MptsFanOut.cpp
+  src/media/MptsPipeline.cpp
 )
 
 core_sources="$(awk '/^set\(CORE_SOURCES/{on=1; next} on && /^\)/{exit} on' "$CMAKE")"
