@@ -72,6 +72,9 @@ struct MsftsCatalog {
 class MsftsMuxer {
 public:
     static QByteArray catalogJson(const MsftsCatalog& catalog);
+    // The independent catalog that ends a live broadcast for good (MSF -01
+    // Section 11.3): isComplete true and no track.
+    static QByteArray completeCatalogJson(const MsftsCatalog& catalog);
 
     // One MSF media timeline record (draft-ietf-moq-msf-01 Section 7.1.1):
     //   [mediaPresentationTimeMs, [groupId, objectId], wallclockMs]
