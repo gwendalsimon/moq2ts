@@ -257,12 +257,15 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
         qWarning() << "[SRT] epoll_create failed:" << srt_getlasterror_str();
         return;
     }
-    const int events = SRT_EPOLL_IN | SRT_EPOLL_ERR;
-    srt_epoll_add_usock(eid, sock, &events);
     struct EpollRelease {
         int eid;
         ~EpollRelease() { srt_epoll_release(eid); }
     } epollRelease{eid};
+    const int events = SRT_EPOLL_IN | SRT_EPOLL_ERR;
+    if (srt_epoll_add_usock(eid, sock, &events) == SRT_ERROR) {
+        qWarning() << "[SRT] Cannot wait for data on the socket:" << srt_getlasterror_str();
+        return;
+    }
 
     while (!stopRequested.load(std::memory_order_acquire)) {
         drainToPipe();
