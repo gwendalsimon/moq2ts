@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Two-program SRT -> moq2ts publisher -> draft-22 relay -> moq5 receiver.
-# Requires a running relay and installed ffmpeg/ffprobe.
+# Requires a draft-22 relay (a local moq5-relay by default, see e2e-relay.sh)
+# and installed ffmpeg/ffprobe. RELAY_URL selects an existing relay instead.
 set -euo pipefail
 
-: "${RELAY_URL:?set RELAY_URL to the relay, e.g. moqt://127.0.0.1:4433}"
 : "${MOQ2TS_CLI:?set MOQ2TS_CLI to the moq2ts-cli binary}"
 : "${MOQ2TS_RECEIVER:?set MOQ2TS_RECEIVER to the moq2ts-receiver binary}"
 SRT_PORT="${SRT_PORT:-9123}"
@@ -16,6 +16,9 @@ cleanup() {
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
+# shellcheck source=tests/e2e-relay.sh
+. "$(dirname "${BASH_SOURCE[0]}")/e2e-relay.sh"
+e2e_relay_start "$work" || exit 1
 
 ffmpeg -hide_banner -loglevel error -y \
   -f lavfi -i testsrc2=size=320x180:rate=25 -f lavfi -i sine=frequency=1000 \
