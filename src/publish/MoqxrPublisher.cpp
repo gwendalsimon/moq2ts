@@ -313,7 +313,11 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         }
 
         const auto stats = activePublisher->stats();
-        emit framePublished(mediaTrackName, static_cast<int64_t>(stats.bytes_published), static_cast<int64_t>(stats.objects_published));
+        // moqxr copies its session counts into stats() only when the publish
+        // succeeds; after a failure they are not what it sent.
+        if (status.ok) {
+            emit sentTotals(static_cast<int64_t>(stats.objects_published), static_cast<int64_t>(stats.bytes_published));
+        }
         const QString unexpectedEnd = unexpectedEndReason(cfg.liveSource, running.load(std::memory_order_acquire),
                                                           publisherStopped,
                                                           sourceEnded->load(std::memory_order_acquire));
@@ -355,12 +359,13 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
     int64_t publisherBytes = catalog.size();
     emit framePublished(QStringLiteral("catalog"), publisherBytes, publisherObjects);
 
-    // The same look-ahead as the real path, so the mock logs what it would send.
+    // The same look-ahead as the real path, so the mock logs what it would
+    // send. It sends what it pulls.
     ObjectLookahead lookahead(std::move(nextObject));
     while (running.load(std::memory_order_acquire)) {
         std::optional<ReadyObject> ready = lookahead.next();
         if (!ready.has_value()) {
-            return true;
+            break;
         }
         const PublishedObject* object = &ready->object;
         qDebug() << "MOCK MSFTS publish" << object->trackName << "group=" << object->groupId
@@ -374,6 +379,7 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
             QThread::msleep(static_cast<unsigned long>(pacingMs));
         }
     }
+    emit sentTotals(publisherObjects, publisherBytes);
     return true;
 }
 

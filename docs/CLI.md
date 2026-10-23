@@ -89,6 +89,13 @@ it runs. A file source waits 120 s for its first subscriber. When the session
 ends while a live source still runs, without a stop or the end of the source,
 moq2ts logs a warning that says so and exits with code 1.
 
+At exit, moq2ts prints a `[final]` line on stdout. `pulled_objects` and
+`pulled_bytes` count the Objects handed to moqxr, catalog and timeline Objects
+included; `sent_objects` and `sent_bytes` count what moqxr sent, which is less
+while nobody subscribes, and are `unknown` after a failed publish. The
+single-source path also prints the media totals `objects`, `bytes`, and
+`groups` first.
+
 ## Run: seekable file
 
 ```bash

@@ -53,6 +53,40 @@ struct PublishedObject {
     bool endsBroadcast = false;
 };
 
+// The totals of a publish, for the CLI's [final] line: what the publisher
+// pulled from the pipeline and handed to moqxr (framePublished), and what
+// moqxr wrote (sentTotals). They differ while nobody subscribes, as moqxr
+// drops what it pulls. The sent counts are unknown when moqxr gave none, as
+// after a failed publish. Thread-safe.
+class PublishTotals {
+public:
+    void recordPulled(std::int64_t objects, std::int64_t bytes) {
+        m_pulledObjects.store(objects, std::memory_order_relaxed);
+        m_pulledBytes.store(bytes, std::memory_order_relaxed);
+    }
+    void recordSent(std::int64_t objects, std::int64_t bytes) {
+        m_sentObjects.store(objects, std::memory_order_relaxed);
+        m_sentBytes.store(bytes, std::memory_order_relaxed);
+    }
+    // "pulled_objects=N pulled_bytes=B sent_objects=N sent_bytes=B", with
+    // "unknown" for a sent count moqxr did not give.
+    QString finalFields() const {
+        const auto sent = [](std::int64_t value) {
+            return value < 0 ? QStringLiteral("unknown") : QString::number(value);
+        };
+        return QStringLiteral("pulled_objects=%1 pulled_bytes=%2 sent_objects=%3 sent_bytes=%4")
+            .arg(m_pulledObjects.load(std::memory_order_relaxed))
+            .arg(m_pulledBytes.load(std::memory_order_relaxed))
+            .arg(sent(m_sentObjects.load(std::memory_order_relaxed)), sent(m_sentBytes.load(std::memory_order_relaxed)));
+    }
+
+private:
+    std::atomic<std::int64_t> m_pulledObjects{0};
+    std::atomic<std::int64_t> m_pulledBytes{0};
+    std::atomic<std::int64_t> m_sentObjects{-1};
+    std::atomic<std::int64_t> m_sentBytes{-1};
+};
+
 class IMoqOutput {
 public:
     virtual ~IMoqOutput() = default;
@@ -112,7 +146,12 @@ public:
 
 signals:
     void connectionStateChanged(bool connected, const QString& message);
+    // Each Object handed to moqxr, with the running totals: what was
+    // pulled, which moqxr may drop while nobody subscribes.
     void framePublished(const QString& track, int64_t bytes, int64_t objects);
+    // What moqxr wrote, from its statistics, once a publish ends without an
+    // error. Not emitted after a failed publish: moqxr then keeps no count.
+    void sentTotals(int64_t objects, int64_t bytes);
     void publishError(const QString& error);
 
 private:

@@ -1,12 +1,15 @@
 #include "app/PublishConfig.h"
 #include "publish/MoqxrPublisher.h"
 
+#include <atomic>
 #include <chrono>
 #include <iostream>
+#include <string>
+#include <optional>
 
 int main() {
     bool ok = true;
-    const auto check = [&ok](bool condition, const char* message) {
+    const auto check = [&ok](bool condition, const std::string& message) {
         if (!condition) {
             std::cerr << "FAIL: " << message << '\n';
             ok = false;
@@ -56,5 +59,51 @@ int main() {
     check(MoqxrPublisher::unexpectedEndReason(true, true, false, true).isEmpty(),
           "the end of the source is no unexpected end");
     check(MoqxrPublisher::unexpectedEndReason(false, true, false, false).isEmpty(), "a file publish keeps its behaviour");
+
+    // The [final] line keeps what the publisher pulled apart from what moqxr
+    // sent: a run without a subscriber pulls everything and sends nothing.
+    {
+        moq2ts::PublishTotals totals;
+        check(totals.finalFields() == "pulled_objects=0 pulled_bytes=0 sent_objects=unknown sent_bytes=unknown",
+              "before any report, the sent counts are unknown");
+        totals.recordPulled(12, 34);
+        totals.recordSent(5, 6);
+        check(totals.finalFields() == "pulled_objects=12 pulled_bytes=34 sent_objects=5 sent_bytes=6",
+              "pulled and sent are reported apart: " + totals.finalFields().toStdString());
+
+        // The mock publisher sends what it pulls: the catalog and three Objects.
+        moq2ts::PublishTotals mock;
+        moq2ts::PublishConfig cfg;
+        cfg.moqEndpoint = QStringLiteral("mock://local");
+        cfg.fragmentDurationMs = 0;
+        MoqxrPublisher publisher;
+        QObject::connect(&publisher, &MoqxrPublisher::framePublished, &publisher,
+                         [&mock](const QString&, int64_t bytes, int64_t objects) { mock.recordPulled(objects, bytes); },
+                         Qt::DirectConnection);
+        QObject::connect(&publisher, &MoqxrPublisher::sentTotals, &publisher,
+                         [&mock](int64_t objects, int64_t bytes) { mock.recordSent(objects, bytes); },
+                         Qt::DirectConnection);
+        publisher.connect(cfg);
+        int left = 3;
+        std::atomic<bool> running{true};
+        const bool published = publisher.publishLiveObjects(
+            cfg, QStringLiteral("program-1"), {}, QByteArray(10, 'c'),
+            [&left]() -> std::optional<moq2ts::PublishedObject> {
+                if (left == 0) {
+                    return std::nullopt;
+                }
+                --left;
+                moq2ts::PublishedObject object;
+                object.trackName = QStringLiteral("program-1");
+                object.groupId = static_cast<std::uint64_t>(3 - left);
+                object.startsGroup = true;
+                object.payload = QByteArray(100, 'x');
+                return object;
+            },
+            running);
+        check(published, "mock publish succeeds");
+        check(mock.finalFields() == "pulled_objects=4 pulled_bytes=310 sent_objects=4 sent_bytes=310",
+              "the mock reports what it sent: " + mock.finalFields().toStdString());
+    }
     return ok ? 0 : 1;
 }
