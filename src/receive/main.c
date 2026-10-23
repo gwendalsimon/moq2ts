@@ -277,7 +277,11 @@ int main(int argc, char **argv) {
                     fatal = true;
                     break;
                 }
-            } else if (ev.kind == MOQ_MEDIA_TRACK_ENDED && selected && ev.track == selected->handle) {
+            } else if ((ev.kind == MOQ_MEDIA_TRACK_ENDED || ev.kind == MOQ_MEDIA_TRACK_REMOVED) &&
+                       selected && ev.track == selected->handle) {
+                /* A catalog that drops the track, such as the isComplete
+                 * catalog that ends a live broadcast (MSF Section 11.3),
+                 * ends it too. */
                 ended = true;
             } else if ((ev.kind == MOQ_MEDIA_TRACK_LOCAL_FAILURE ||
                         ev.kind == MOQ_MEDIA_TRACK_DELIVERY_LOCAL_FAILURE) &&
@@ -286,7 +290,9 @@ int main(int argc, char **argv) {
                 fatal = true;
             }
         }
-        if (fatal || ended) break;
+        /* Objects queued before the end are still written; the loop exits
+         * after them. */
+        if (fatal) break;
         moq_media_object_t obj;
         while (moq_media_receiver_poll_object(rx, &obj, sizeof(obj)) == MOQ_OK) {
             bool duplicate = false;
