@@ -179,6 +179,11 @@ int main() {
     ok &= expect(gap.has_value() && *gap == perCaller,
                  "gap offset is " + (gap ? std::to_string(*gap) : std::string("absent")) + ", want " +
                      std::to_string(perCaller));
+    // The gap names the new caller, not the receive buffer.
+    unsigned causes = 0;
+    const bool taken = gaps.takeUpTo(perCaller, &causes);
+    ok &= expect(taken && causes == SourceGapLog::SrtNewCaller,
+                 "gap cause is " + std::to_string(causes) + ", want SrtNewCaller");
 
     if (second != SRT_INVALID_SOCK) {
         srt_close(second);

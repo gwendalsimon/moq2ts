@@ -20,6 +20,7 @@
 
 using moq2ts::M2tsObject;
 using moq2ts::M2tsPacketizer;
+using moq2ts::SourceGapLog;
 namespace tb = moq2ts::test;
 
 namespace {
@@ -801,7 +802,8 @@ int main() {
         };
         // gapBeforeFirst: the gap is known at open(); otherwise it is recorded
         // once the first Object is out.
-        const auto run = [&](const QString& name, bool gapBeforeFirst, std::uint64_t offset) {
+        const auto run = [&](const QString& name, bool gapBeforeFirst, std::uint64_t offset,
+                             unsigned cause = SourceGapLog::SrtReceiveBuffer) {
             GapRun result;
             const QString fifo = dir.filePath(name);
             ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
@@ -811,7 +813,7 @@ int main() {
             packetizer.setTransparent(true);
             packetizer.setSourceGaps(gaps);
             if (gapBeforeFirst) {
-                gaps->record(offset);
+                gaps->record(offset, cause);
             }
             if (packetizer.open(0, &result.error)) {
                 result.randomAccess = packetizer.randomAccess();
@@ -819,7 +821,7 @@ int main() {
                 while (packetizer.readObject(3, &object, &result.error)) {
                     result.objects.append(object);
                     if (!gapBeforeFirst && result.objects.size() == 1) {
-                        gaps->record(offset);
+                        gaps->record(offset, cause);
                     }
                 }
             }
@@ -848,12 +850,72 @@ int main() {
                          first.objects[0].groupId == 0 && first.objects[0].startsGroup,
                      "gap before the first Object: the track starts where the source resumed, in Group 0");
 
+        // The warning names the hop that skipped ahead.
+        qInstallMessageHandler(captureWarning);
+        warnings().clear();
+        run("gap-srt.fifo", false, gapOffset);
+        const QStringList srtWarnings = warnings();
+        warnings().clear();
+        run("gap-caller.fifo", false, gapOffset, SourceGapLog::SrtNewCaller);
+        const QStringList callerWarnings = warnings();
+        qInstallMessageHandler(nullptr);
+        ok &= expect(callerWarnings.filter("new SRT caller").size() == 1 &&
+                         callerWarnings.filter("receive buffer").isEmpty(),
+                     "gap warning: a new SRT caller is named, not the receive buffer: " +
+                         callerWarnings.join(" | ").toStdString());
+        ok &= expect(srtWarnings.filter("SRT receive buffer").size() == 1,
+                     "gap warning: an SRT gap names the SRT receive buffer");
+
         const GapRun none = run("gap-zero.fifo", true, 0);
         ok &= expect(none.error.isEmpty() && none.objects.size() == 3 &&
                          none.objects[0].payload == packet(2) + packet(3) + packet(4) &&
                          none.objects[1].payload == packet(5) + packet(6) + packet(7) &&
                          none.objects[1].groupId == 1 && none.objects[2].groupId == 1,
                      "gap at offset 0: no gap, the Groups follow the RAPs");
+    }
+
+    // A PMT whose PCR_PID is 0 (the PAT PID) names no PCR PID: PIDs 0x0000 to
+    // 0x000F carry tables, never a PCR. After a gap, per-program carriage
+    // looks for the first PCR to mark; the PAT packets it rewrites are not
+    // looked at, and go out with their table unchanged.
+    {
+        const auto video = [](int cc, bool rap) {
+            return rap ? tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000 * cc), cc, 0x40)
+                       : tb::tsPacket(0x100, false, QByteArray(184, char(cc)), cc);
+        };
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x0000, {{0x1B, 0x100}}));
+        ts += video(0, true) + video(1, false) + tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), 1);
+        const std::uint64_t gapOffset = static_cast<std::uint64_t>(ts.size());
+        ts += video(2, true) + tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), 2) + video(3, false);
+        const QString fifo = dir.filePath("pcr-pid-zero.fifo");
+        ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+        std::thread writer([&] { writeFile(fifo, ts); });
+        auto gaps = std::make_shared<moq2ts::SourceGapLog>();
+        M2tsPacketizer packetizer(fifo);
+        packetizer.setSourceGaps(gaps);
+        QString error;
+        QList<QByteArray> patPackets;
+        bool opened = packetizer.open(1, &error);
+        if (opened) {
+            M2tsObject object;
+            while (packetizer.readObject(1, &object, &error)) {
+                if (object.objectId == 0 && object.groupId == 0) {
+                    gaps->record(gapOffset);
+                }
+                if (pidOfPacket(object.payload) == 0x0000) {
+                    patPackets.append(object.payload);
+                }
+            }
+        }
+        writer.join();
+        ok &= expect(opened, "PCR_PID 0: opens: " + error.toStdString());
+        ok &= expect(packetizer.pcrPid() == -1, "PCR_PID 0: no PCR PID (" + std::to_string(packetizer.pcrPid()) + ")");
+        bool unchanged = !patPackets.isEmpty();
+        for (const QByteArray& packet : patPackets) {
+            unchanged = unchanged && packet.size() == 188 && packet[4] == char(0x00) && packet[5] == char(0x00);
+        }
+        ok &= expect(unchanged, "PCR_PID 0: the rewritten PAT packets keep pointer_field 0 and table_id 0");
     }
 
     // A multiplex without a reference program goes on when the program whose

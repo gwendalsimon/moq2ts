@@ -486,6 +486,13 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(moq2ts-object-lookahead-tests PRIVATE moq2ts-core)
     add_test(NAME moq2ts-object-lookahead-tests COMMAND moq2ts-object-lookahead-tests)
 
+    # LivePipeline on a FIFO with source gaps, as SRT ingest feeds it.
+    add_executable(moq2ts-live-pipeline-gap-tests tests/live_pipeline_gap_test.cpp)
+    target_include_directories(moq2ts-live-pipeline-gap-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-live-pipeline-gap-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-live-pipeline-gap-tests COMMAND moq2ts-live-pipeline-gap-tests)
+    set_tests_properties(moq2ts-live-pipeline-gap-tests PROPERTIES TIMEOUT 60)
+
     # The pipeline against the mock transport: how a live source ends.
     add_executable(moq2ts-live-pipeline-end-tests tests/live_pipeline_end_test.cpp)
     target_include_directories(moq2ts-live-pipeline-end-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

@@ -137,7 +137,7 @@ bool LivePipeline::running() const {
     return m_running.load(std::memory_order_acquire);
 }
 
-void LivePipeline::start(const PublishConfig& cfg, MoqxrPublisher* publisher) {
+void LivePipeline::start(const PublishConfig& cfg, IMoqOutput* publisher) {
     if (m_running.load(std::memory_order_acquire)) {
         emit status(QStringLiteral("Pipeline already running."));
         return;
