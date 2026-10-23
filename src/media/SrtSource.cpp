@@ -33,6 +33,28 @@ void ensureSrtInit() {
         srtInitialized() = true;
     }
 }
+
+// Socket options shared by both modes. They must be set before connect/listen;
+// a listener's accepted sockets inherit them.
+void applyOptions(SRTSOCKET sock, const SrtSource::Config& cfg) {
+    int latency = cfg.latencyMs;
+    srt_setsockflag(sock, SRTO_RCVLATENCY, &latency, sizeof(latency));
+    srt_setsockflag(sock, SRTO_PEERLATENCY, &latency, sizeof(latency));
+    int timeout = cfg.timeoutMs;
+    srt_setsockflag(sock, SRTO_RCVTIMEO, &timeout, sizeof(timeout));
+    // Receive headroom. Absorbs transient scheduling delays so the kernel/SRT
+    // buffers do not overflow and force packet drops.
+    if (cfg.rcvBufBytes > 0) {
+        int rcvBuf = cfg.rcvBufBytes;
+        srt_setsockflag(sock, SRTO_RCVBUF, &rcvBuf, sizeof(rcvBuf));
+    }
+    if (cfg.udpRcvBufBytes > 0) {
+        int udpRcvBuf = cfg.udpRcvBufBytes;
+        srt_setsockflag(sock, SRTO_UDP_RCVBUF, &udpRcvBuf, sizeof(udpRcvBuf));
+    }
+    int no = 0;
+    srt_setsockflag(sock, SRTO_SNDSYN, &no, sizeof(no)); // non-blocking send (unused but safe)
+}
 } // namespace
 
 QString SrtSource::connect(const Config& cfg, int& sockOut) {
@@ -53,24 +75,7 @@ QString SrtSource::connect(const Config& cfg, int& sockOut) {
         return QStringLiteral("SRT: srt_create_socket failed: %1").arg(srt_getlasterror_str());
     }
 
-    // Options
-    int latency = cfg.latencyMs;
-    srt_setsockflag(sock, SRTO_RCVLATENCY, &latency, sizeof(latency));
-    srt_setsockflag(sock, SRTO_PEERLATENCY, &latency, sizeof(latency));
-    int timeout = cfg.timeoutMs;
-    srt_setsockflag(sock, SRTO_RCVTIMEO, &timeout, sizeof(timeout));
-    // Receive headroom (must be set before connect). Absorbs transient scheduling
-    // delays so the kernel/SRT buffers do not overflow and force packet drops.
-    if (cfg.rcvBufBytes > 0) {
-        int rcvBuf = cfg.rcvBufBytes;
-        srt_setsockflag(sock, SRTO_RCVBUF, &rcvBuf, sizeof(rcvBuf));
-    }
-    if (cfg.udpRcvBufBytes > 0) {
-        int udpRcvBuf = cfg.udpRcvBufBytes;
-        srt_setsockflag(sock, SRTO_UDP_RCVBUF, &udpRcvBuf, sizeof(udpRcvBuf));
-    }
-    int no = 0;
-    srt_setsockflag(sock, SRTO_SNDSYN, &no, sizeof(no)); // non-blocking send (unused but safe)
+    applyOptions(sock, cfg);
 
     // Connect (caller mode)
     if (srt_connect(sock, res->ai_addr, static_cast<int>(res->ai_addrlen)) == SRT_ERROR) {
@@ -88,8 +93,45 @@ QString SrtSource::connect(const Config& cfg, int& sockOut) {
     return QString();
 }
 
+QString SrtSource::listen(const Config& cfg, int& listenSockOut) {
+    ensureSrtInit();
+    listenSockOut = SRT_INVALID_SOCK;
+
+    struct addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
+    const std::string portStr = std::to_string(cfg.port);
+    if (getaddrinfo(cfg.host.c_str(), portStr.c_str(), &hints, &res) != 0 || !res) {
+        return QStringLiteral("SRT: cannot resolve %1:%2").arg(QString::fromStdString(cfg.host)).arg(cfg.port);
+    }
+
+    SRTSOCKET sock = srt_create_socket();
+    if (sock == SRT_INVALID_SOCK) {
+        freeaddrinfo(res);
+        return QStringLiteral("SRT: srt_create_socket failed: %1").arg(srt_getlasterror_str());
+    }
+    applyOptions(sock, cfg);
+
+    if (srt_bind(sock, res->ai_addr, static_cast<int>(res->ai_addrlen)) == SRT_ERROR ||
+        srt_listen(sock, 1) == SRT_ERROR) {
+        const QString err = QStringLiteral("SRT: listen on %1:%2 failed: %3")
+                                .arg(QString::fromStdString(cfg.host))
+                                .arg(cfg.port)
+                                .arg(srt_getlasterror_str());
+        srt_close(sock);
+        freeaddrinfo(res);
+        return err;
+    }
+    freeaddrinfo(res);
+
+    listenSockOut = sock;
+    return QString();
+}
+
 void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequested,
-                            const std::atomic<int>* resyncPid, SourceGapLog* gaps) {
+                            const std::atomic<int>* resyncPid, SourceGapLog* gaps,
+                            std::uint64_t* outputOffset) {
     // SRT delivers TS in pkt_size chunks (typically 1316 = 7x188).
     //
     // The receive path must never block. Writing straight to the pipe did block:
@@ -134,7 +176,8 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
     char buf[kBufSize];
     // Bytes written to the pipe so far: the offset of the next byte the reader
     // gets, which is where a gap falls in what it reads.
-    std::uint64_t written = 0;
+    std::uint64_t localWritten = 0;
+    std::uint64_t& written = outputOffset != nullptr ? *outputOffset : localWritten;
     // A gap has been recorded and its resync has not completed yet.
     bool gapOpen = false;
 
@@ -262,6 +305,60 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
             }
         }
     }
+}
+
+void SrtSource::listenLoop(int listenSock, int pipeFd, std::atomic<bool>& stopRequested,
+                           const std::atomic<int>* resyncPid, SourceGapLog* gaps) {
+    // srt_accept() cannot be given a timeout, so wait for a pending caller on an
+    // epoll with one and keep checking stopRequested between waits.
+    constexpr int kAcceptPollMs = 200;
+    const int eid = srt_epoll_create();
+    if (eid < 0) {
+        qWarning() << "[SRT] epoll_create failed:" << srt_getlasterror_str();
+        return;
+    }
+    const int events = SRT_EPOLL_IN | SRT_EPOLL_ERR;
+    srt_epoll_add_usock(eid, listenSock, &events);
+
+    // Bytes written to the pipe across every caller: where the next caller's
+    // data begins in what the reader gets.
+    std::uint64_t written = 0;
+    bool first = true;
+    while (!stopRequested.load(std::memory_order_acquire)) {
+        SRTSOCKET ready[2];
+        int readyCount = 2;
+        if (srt_epoll_wait(eid, ready, &readyCount, nullptr, nullptr, kAcceptPollMs, nullptr, nullptr,
+                           nullptr, nullptr) == SRT_ERROR) {
+            if (srt_getlasterror(nullptr) != SRT_ETIMEOUT) {
+                qWarning() << "[SRT] Waiting for a caller failed:" << srt_getlasterror_str();
+                break;
+            }
+            continue;
+        }
+
+        sockaddr_storage peer{};
+        int peerLen = sizeof(peer);
+        const SRTSOCKET sock = srt_accept(listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+        if (sock == SRT_INVALID_SOCK) {
+            continue;  // the caller gave up before the accept
+        }
+        qInfo() << "[SRT] Caller connected";
+
+        // A caller after the first one starts a new stretch of the stream: its
+        // first byte is the next one the reader gets. Streams that bridge two
+        // encoders can jump in time and PCR here.
+        if (!first && gaps != nullptr) {
+            gaps->record(written);
+        }
+        first = false;
+
+        receiveLoop(sock, pipeFd, stopRequested, resyncPid, gaps, &written);
+        srt_close(sock);
+        if (!stopRequested.load(std::memory_order_acquire)) {
+            qInfo() << "[SRT] Caller disconnected; waiting for the next one";
+        }
+    }
+    srt_epoll_release(eid);
 }
 
 void SrtSource::close(int sock) {

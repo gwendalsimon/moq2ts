@@ -246,7 +246,18 @@ int main(int argc, char** argv) {
         const QString callerId = caller.value(QStringLiteral("id")).toString(QStringLiteral("default"));
 
         moq2ts::SrtSource::Config srtCfg;
-        srtCfg.host = srtObj.value(QStringLiteral("host")).toString(QStringLiteral("127.0.0.1")).toStdString();
+        const QString modeStr = srtObj.value(QStringLiteral("mode")).toString(QStringLiteral("caller"));
+        if (modeStr != QStringLiteral("caller") && modeStr != QStringLiteral("listener")) {
+            logLine(stderr, "error",
+                    QStringLiteral("SRT config: unknown mode '%1' (use \"caller\" or \"listener\")").arg(modeStr));
+            return 1;
+        }
+        const bool listener = modeStr == QStringLiteral("listener");
+        srtCfg.mode = listener ? moq2ts::SrtSource::Config::Mode::Listener : moq2ts::SrtSource::Config::Mode::Caller;
+        // A listener binds host; by default every interface.
+        srtCfg.host = srtObj.value(QStringLiteral("host"))
+                          .toString(listener ? QStringLiteral("0.0.0.0") : QStringLiteral("127.0.0.1"))
+                          .toStdString();
         srtCfg.port = static_cast<uint16_t>(srtObj.value(QStringLiteral("port")).toInt(9000));
         srtCfg.latencyMs = srtObj.value(QStringLiteral("latency_ms")).toInt(120);
         // Optional receive-headroom overrides; absent keys keep the built-in defaults.
@@ -254,18 +265,31 @@ int main(int argc, char** argv) {
         srtCfg.udpRcvBufBytes =
             srtObj.value(QStringLiteral("udp_rcvbuf_bytes")).toInt(srtCfg.udpRcvBufBytes);
 
-        logLine(stderr, "srt", QStringLiteral("Caller '%1': connecting to srt://%2:%3 (latency=%4ms)...")
-                                   .arg(callerId)
-                                   .arg(QString::fromStdString(srtCfg.host))
-                                   .arg(srtCfg.port)
-                                   .arg(srtCfg.latencyMs));
+        if (listener) {
+            logLine(stderr, "srt", QStringLiteral("Listener '%1': waiting for a caller on srt://%2:%3 (latency=%4ms)...")
+                                       .arg(callerId)
+                                       .arg(QString::fromStdString(srtCfg.host))
+                                       .arg(srtCfg.port)
+                                       .arg(srtCfg.latencyMs));
+            const QString err = moq2ts::SrtSource::listen(srtCfg, srtSock);
+            if (!err.isEmpty()) {
+                logLine(stderr, "error", err);
+                return 1;
+            }
+        } else {
+            logLine(stderr, "srt", QStringLiteral("Caller '%1': connecting to srt://%2:%3 (latency=%4ms)...")
+                                       .arg(callerId)
+                                       .arg(QString::fromStdString(srtCfg.host))
+                                       .arg(srtCfg.port)
+                                       .arg(srtCfg.latencyMs));
 
-        const QString err = moq2ts::SrtSource::connect(srtCfg, srtSock);
-        if (!err.isEmpty()) {
-            logLine(stderr, "error", err);
-            return 1;
+            const QString err = moq2ts::SrtSource::connect(srtCfg, srtSock);
+            if (!err.isEmpty()) {
+                logLine(stderr, "error", err);
+                return 1;
+            }
+            logLine(stderr, "srt", QStringLiteral("Connected to SRT source"));
         }
-        logLine(stderr, "srt", QStringLiteral("Connected to SRT source"));
 
         // Create a pipe: SRT thread writes TS to pipe[1], M2tsPacketizer reads from pipe[0]
         if (::pipe(srtPipeFds) != 0) {
@@ -284,8 +308,12 @@ int main(int argc, char** argv) {
         // The packetizer starts a Group where the receive thread skipped ahead.
         auto sourceGaps = std::make_shared<moq2ts::SourceGapLog>();
         cfg.sourceGaps = sourceGaps;
-        srtThread = std::make_unique<std::thread>([srtSock, writeFd = srtPipeFds[1], &srtStop, resyncPid, sourceGaps]() {
-            moq2ts::SrtSource::receiveLoop(srtSock, writeFd, srtStop, resyncPid.get(), sourceGaps.get());
+        srtThread = std::make_unique<std::thread>([srtSock, listener, writeFd = srtPipeFds[1], &srtStop, resyncPid, sourceGaps]() {
+            if (listener) {
+                moq2ts::SrtSource::listenLoop(srtSock, writeFd, srtStop, resyncPid.get(), sourceGaps.get());
+            } else {
+                moq2ts::SrtSource::receiveLoop(srtSock, writeFd, srtStop, resyncPid.get(), sourceGaps.get());
+            }
             ::close(writeFd); // close write end to signal EOF to reader
         });
 

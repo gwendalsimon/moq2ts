@@ -95,10 +95,10 @@ on error, 2 on invalid arguments.
 
 ## Run: live feed over SRT
 
-`moq2ts-cli` connects out as an SRT **caller**, so the encoder side runs an SRT
-**listener**. Point `--srt-config` at a JSON file in moqxr's format; the first
-entry in `srt_callers` is used. `--video` is not needed, the SRT feed is the
-source.
+By default `moq2ts-cli` connects out as an SRT **caller**, so the encoder side
+runs an SRT **listener** (the opposite arrangement is under "Listener mode").
+Point `--srt-config` at a JSON file in moqxr's format; the first entry in
+`srt_callers` is used. `--video` is not needed, the SRT feed is the source.
 
 ```json
 {
@@ -134,6 +134,32 @@ publisher reads the SRT payloads as one byte stream and passes on whole packets
 only, so a sender whose payloads do not end on a packet boundary still works.
 `latency_ms` sets SRT's retransmit buffer, which absorbs network jitter on the
 ingest side before the publisher ever sees the bytes.
+
+### Listener mode
+
+To have the encoder push the stream to the publisher, set `"mode": "listener"`.
+`moq2ts-cli` then binds `host:port` (`host` defaults to `0.0.0.0`, every
+interface) and accepts one caller at a time. When that caller disconnects, the
+publisher waits for the next one and keeps publishing. The new caller's data
+starts a new Group, because its timestamps and PCR need not continue the
+previous caller's. The other keys behave as in caller mode.
+
+```json
+{
+  "srt_callers": [
+    {
+      "id": "encoder1",
+      "srt": { "mode": "listener", "host": "0.0.0.0", "port": 9000, "latency_ms": 200 }
+    }
+  ]
+}
+```
+
+```bash
+# Encoder side: ffmpeg calls the publisher.
+ffmpeg -re -i input.ts -c copy -f mpegts \
+  "srt://<publisher-host>:9000?mode=caller&pkt_size=1316"
+```
 
 **SRT ingest always uses unmodified carriage** (`--publish-multiplex` says so
 explicitly). A contribution feed is forwarded as received, so the per-program
