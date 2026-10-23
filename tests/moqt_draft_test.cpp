@@ -36,11 +36,17 @@ int main() {
 
     // A publish that moqxr ends without an error is a failure for a live
     // source, unless moq2ts asked for it: a stop, or the end of the source.
-    const QString early = MoqxrPublisher::unexpectedEndReason(true, false, false);
+    // Arguments: live source, running, publisher stopped, source ended.
+    const QString early = MoqxrPublisher::unexpectedEndReason(true, true, false, false);
     check(!early.isEmpty(), "a live publish that ends on its own has a reason");
     check(early.contains(QStringLiteral("live source")), "the reason says the live source was still running");
-    check(MoqxrPublisher::unexpectedEndReason(true, true, false).isEmpty(), "a stop is no unexpected end");
-    check(MoqxrPublisher::unexpectedEndReason(true, false, true).isEmpty(), "the end of the source is no unexpected end");
-    check(MoqxrPublisher::unexpectedEndReason(false, false, false).isEmpty(), "a file publish keeps its behaviour");
+    check(MoqxrPublisher::unexpectedEndReason(true, false, false, false).isEmpty(), "a stop is no unexpected end");
+    // SIGINT/SIGTERM on the --config path: MoqxrPublisher::stop() ends the
+    // publish before the pipeline clears running.
+    check(MoqxrPublisher::unexpectedEndReason(true, true, true, false).isEmpty(),
+          "an interrupt that stops the publisher first is no unexpected end");
+    check(MoqxrPublisher::unexpectedEndReason(true, true, false, true).isEmpty(),
+          "the end of the source is no unexpected end");
+    check(MoqxrPublisher::unexpectedEndReason(false, true, false, false).isEmpty(), "a file publish keeps its behaviour");
     return ok ? 0 : 1;
 }

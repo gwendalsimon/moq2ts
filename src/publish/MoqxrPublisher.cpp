@@ -263,7 +263,15 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         openmoq::publisher::transport::TlsConfig tls;
         tls.insecure_skip_verify = cfg.insecure;
         const auto status = activePublisher->publish_live_objects(source, parseEndpoint(cfg.moqEndpoint), tls, false);
-        if (!status.ok && running.load(std::memory_order_acquire)) {
+        // A stop request: running turned false, or stop() ended the publish.
+        // The CLI stops the publisher before the pipeline on SIGINT/SIGTERM,
+        // so running can still be true here after an interrupt.
+        bool publisherStopped = false;
+        {
+            QMutexLocker locker(&m_mutex);
+            publisherStopped = !m_connected;
+        }
+        if (!status.ok && running.load(std::memory_order_acquire) && !publisherStopped) {
             emit publishError(QString::fromStdString(status.message));
             QMutexLocker locker(&m_mutex);
             if (m_activePublisher == activePublisher) {
@@ -292,7 +300,8 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
 
         const auto stats = activePublisher->stats();
         emit framePublished(mediaTrackName, static_cast<int64_t>(stats.bytes_published), static_cast<int64_t>(stats.objects_published));
-        const QString unexpectedEnd = unexpectedEndReason(cfg.liveSource, !running.load(std::memory_order_acquire),
+        const QString unexpectedEnd = unexpectedEndReason(cfg.liveSource, running.load(std::memory_order_acquire),
+                                                          publisherStopped,
                                                           sourceEnded->load(std::memory_order_acquire));
         if (!unexpectedEnd.isEmpty()) {
             qWarning("%s (%llu Objects sent%s%s).", qUtf8Printable(unexpectedEnd),
@@ -400,8 +409,8 @@ std::chrono::seconds MoqxrPublisher::subscriberTimeout(bool liveSource) {
     return liveSource ? std::chrono::hours(24 * 365 * 10) : std::chrono::seconds(120);
 }
 
-QString MoqxrPublisher::unexpectedEndReason(bool liveSource, bool stopRequested, bool sourceEnded) {
-    if (!liveSource || stopRequested || sourceEnded) {
+QString MoqxrPublisher::unexpectedEndReason(bool liveSource, bool running, bool publisherStopped, bool sourceEnded) {
+    if (!liveSource || !running || publisherStopped || sourceEnded) {
         return {};
     }
     // moqxr gives no reason with a success: with no subscriber timeout left

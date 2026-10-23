@@ -97,10 +97,12 @@ public:
     // A file keeps a bounded wait.
     static std::chrono::seconds subscriberTimeout(bool liveSource);
     // Why a publish that moqxr ended without an error ended too soon, or empty
-    // when it ended as moq2ts asked: stopRequested (running turned false), or
-    // sourceEnded (the source had no more Objects). Only a live source ends
-    // too soon: a file publish ends after its bounded wait, as before.
-    static QString unexpectedEndReason(bool liveSource, bool stopRequested, bool sourceEnded);
+    // when it ended as moq2ts asked: running turned false, publisherStopped
+    // (stop() ended it, as the CLI does first on SIGINT/SIGTERM, while running
+    // is still true), or sourceEnded (the source had no more Objects). Only a
+    // live source ends too soon: a file publish ends after its bounded wait,
+    // as before.
+    static QString unexpectedEndReason(bool liveSource, bool running, bool publisherStopped, bool sourceEnded);
 
 signals:
     void connectionStateChanged(bool connected, const QString& message);
