@@ -39,6 +39,9 @@ struct M2tsObject {
     // First PCR of the program's PCR PID in this object, in 27 MHz units, or -1.
     // It wraps; PcrClock turns a series of them into media time.
     std::int64_t pcr27 = -1;
+    // Offset in the source of the first packet of payload, which tells the
+    // Objects read before a point in the source from those read after it.
+    std::uint64_t sourceOffset = 0;
 };
 
 // The size of the packets in a probe of the first bytes of a source: 188 for a
@@ -142,6 +145,16 @@ public:
     void setRetainSiTables(bool retain);         // all SI tables; setSiTables(allSiTables())
     void setSiTables(QSet<SiTable> tables);      // keep these SI tables beside the program
     void setRetainNullPackets(bool retain);      // keep null (0x1FFF) packets
+    // A per-program track of a live multiplex, which reads the whole
+    // multiplex: open() bounds its windows by PCR time, not by a packet
+    // count, so they do not shrink as the multiplex rate grows. The PAT and
+    // the PMT get 1 s, the first random access point 10 s, and the rates 1 s,
+    // within 600,000 packets each. The scans keep no packet, so the track
+    // starts at the next random access point after them, and a PCR that does
+    // not advance for about 2 s ends open() with an error. A program without
+    // a PCR PID times them on the first PCR of the multiplex. Off by default: a
+    // file and a single-program source keep their packet windows.
+    void setTimedStartWindows(bool timed);
     // Live source: where the stream skips ahead (SRT ingest). A Group starts at
     // each gap, and the track starts after a gap found before its first Object.
     // In per-program carriage, that Group starts at the next random access
@@ -188,6 +201,9 @@ public:
     // The PID whose random access points start Groups, or -1 while unknown.
     int groupPid() const;
     std::uint64_t objectsRead() const;
+    // Bytes that open() read and keeps for readObject to publish. Always 0
+    // with timed start-up windows, whose scans keep no packet.
+    qsizetype prebufferedBytes() const;
     // True when the source is a non-seekable stream (FIFO, pipe, /dev/stdin),
     // i.e. a live feed rather than a seekable VOD file. Valid after open().
     bool sequential() const;
@@ -198,7 +214,8 @@ public:
 
 private:
     bool detectPacketSize(QString* error);
-    // Reads up to 4096 packets for the PAT and the selected program's PMT.
+    // Reads up to 4096 packets (or 1 s of PCR time, see setTimedStartWindows)
+    // for the PAT and the selected program's PMT.
     bool scanPsi(QString* error);
     void handlePsiPacket(const QByteArray& tsPacket, const QByteArray& sourcePacket);
     void onPat(const PsiAssembler::Section& section);
@@ -325,6 +342,10 @@ private:
     QSet<SiTable> m_siTables;
     QList<int> m_retainedSiPids;
     bool m_retainNullPackets = false;
+    bool m_timedStartWindows = false;
+    // Why a timed start-up window ended open(), or empty.
+    QString m_startError;
+    QString noPcrError() const;
     // True for non-seekable streams (FIFO, /dev/stdin, pipe). In that mode
     // scanPsi cannot rewind, so packets consumed while scanning for
     // PAT/PMT are buffered here and drained by readObject before further reads,

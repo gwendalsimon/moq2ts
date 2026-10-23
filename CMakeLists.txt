@@ -312,16 +312,17 @@ else()
     message(STATUS "SRT ingest disabled (MOQ2TS_ENABLE_SRT=OFF, no libsrt, or unsupported platform); --srt-config will be rejected")
 endif()
 
-# Per-program (MPTS) publishing, as SRT ingest above: MptsFanOut.cpp includes
-# POSIX headers (poll.h, unistd.h) that MSVC lacks, so the MPTS files are
-# compiled only on UNIX. The option makes the excluded build reachable on a
-# UNIX host, to test it.
+# Per-program (MPTS) publishing, as SRT ingest above: MptsFanOut.cpp and
+# MptsPipeline.cpp include POSIX headers (poll.h, unistd.h, fcntl.h, sys/stat.h)
+# that MSVC lacks, so the MPTS files are compiled only on UNIX. The option
+# makes the excluded build reachable on a UNIX host, to test it.
 option(MOQ2TS_ENABLE_MPTS "Build per-program (MPTS) publishing" ON)
 set(MOQ2TS_MPTS_BUILT FALSE)
 if(MOQ2TS_ENABLE_MPTS AND UNIX)
     target_sources(moq2ts-core PRIVATE
         src/media/PacketQueueDevice.cpp src/media/PacketQueueDevice.h
         src/media/MptsFanOut.cpp src/media/MptsFanOut.h
+        src/media/MptsPipeline.cpp src/media/MptsPipeline.h
     )
     set(MOQ2TS_MPTS_BUILT TRUE)
     message(STATUS "Per-program (MPTS) publishing enabled")
@@ -530,4 +531,10 @@ if(UNIX AND NOT APPLE AND MOQ2TS_MPTS_BUILT)
     target_link_libraries(moq2ts-mpts-fanout-tests PRIVATE moq2ts-core)
     add_test(NAME moq2ts-mpts-fanout-tests COMMAND moq2ts-mpts-fanout-tests)
     set_tests_properties(moq2ts-mpts-fanout-tests PROPERTIES TIMEOUT 120)
+
+    add_executable(moq2ts-mpts-pipeline-tests tests/mpts_pipeline_test.cpp)
+    target_include_directories(moq2ts-mpts-pipeline-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-mpts-pipeline-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-mpts-pipeline-tests COMMAND moq2ts-mpts-pipeline-tests)
+    set_tests_properties(moq2ts-mpts-pipeline-tests PROPERTIES TIMEOUT 180)
 endif()

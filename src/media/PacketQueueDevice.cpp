@@ -64,6 +64,23 @@ void PacketQueueDevice::markGap(unsigned causes) {
     m_markers.emplace_back(m_readOffset + static_cast<std::uint64_t>(m_queue.size() - m_head), causes);
 }
 
+std::uint64_t PacketQueueDevice::flushToLiveEdge() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    // The rest of a packet the reader has begun stays, as in overflow.
+    const qsizetype partial = std::min(m_queue.size() - m_head, partialPacket());
+    m_queue = m_queue.mid(m_head, partial);
+    m_head = 0;
+    const std::uint64_t edge = m_readOffset + static_cast<std::uint64_t>(partial);
+    // Gaps in the dropped bytes now fall at the edge, as in overflow.
+    for (auto& [marker, causes] : m_markers) {
+        marker = edge;
+    }
+    if (m_gaps) {
+        m_gaps->record(edge, SourceGapLog::LiveEdge);
+    }
+    return edge;
+}
+
 qsizetype PacketQueueDevice::partialPacket() const {
     const auto begun = static_cast<qsizetype>(m_readOffset % static_cast<std::uint64_t>(m_packetSize));
     return begun == 0 ? 0 : m_packetSize - begun;

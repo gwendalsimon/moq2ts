@@ -50,6 +50,12 @@ public:
     // is), and it reaches the SourceGapLog no later than the read that returns
     // the byte it precedes. An overflow gap has the cause ProgramQueue.
     void markGap(unsigned causes);
+    // Drops everything queued but the rest of a packet the reader has begun,
+    // so the reader goes on with the next byte pushed, and records a gap there
+    // (cause LiveEdge). Returns the offset of that byte in the reader's
+    // stream: the reader read every byte before it, or the start of its
+    // packet, before the flush.
+    std::uint64_t flushToLiveEdge();
     // No more data: the reader gets what is queued, then the end.
     void finish();
     // Wakes a blocked reader at once, and discards what is queued.

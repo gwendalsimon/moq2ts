@@ -182,7 +182,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         publisherConfig.subscriber_timeout = std::chrono::seconds(120);
 
         openmoq::publisher::LiveObjectSource source;
-        source.tracks.push_back({.track_name = "catalog"});
+        source.tracks.push_back({.track_name = kCatalogTrackName});
         source.tracks.push_back({.track_name = mediaTrackName.toStdString()});
         for (const QString& trackName : sideTrackNames) {
             source.tracks.push_back({.track_name = trackName.toStdString()});
@@ -210,7 +210,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 publisherBytes += catalog.size();
                 emit framePublished(QStringLiteral("catalog"), publisherBytes, publisherObjects);
                 return openmoq::publisher::LiveObject{
-                    .track_name = "catalog",
+                    .track_name = kCatalogTrackName,
                     .group_id = 0,
                     .subgroup_id = 0,
                     .object_id = 0,

@@ -247,6 +247,25 @@ int main() {
                      "causes: a collapsed marker merges its cause into the overflow gap");
     }
 
+    // The live edge: a flush drops what is queued, returns the read offset,
+    // and records a gap there that a pending marker joins.
+    {
+        auto gaps = std::make_shared<SourceGapLog>();
+        PacketQueueDevice device(10 * kPacket, gaps);
+        device.push(numbered(0, 3));
+        device.read(kPacket);
+        device.markGap(SourceGapLog::SrtReceiveBuffer);   // at 3 packets
+        device.push(numbered(3, 2));
+        ok &= expect(device.flushToLiveEdge() == kPacket, "flush: returns the read offset");
+        ok &= expect(device.bytesAvailable() == 0, "flush: nothing queued");
+        device.push(numbered(5, 1));
+        ok &= expect(device.read(kPacket) == numbered(5, 1), "flush: the next byte pushed comes next");
+        unsigned causes = 0;
+        ok &= expect(gaps->takeUpTo(kPacket, &causes) &&
+                         causes == (SourceGapLog::LiveEdge | SourceGapLog::SrtReceiveBuffer) && !gaps->next(),
+                     "flush: one gap at the read offset, with both causes");
+    }
+
     // The packetizer's peek of 768 octets takes 4 packets and 16 octets of the
     // fifth from the queue. An overflow then keeps the rest of the fifth, so
     // every packet read is a source packet, and the gap is where the dropped
@@ -267,6 +286,24 @@ int main() {
             ok &= expect(device.read(kPacket) == numbered(n), "peek overflow: packet " + std::to_string(n) + " intact");
         }
     }
+    // The same for the live-edge flush: it keeps the rest of the fifth packet,
+    // and the next byte pushed starts a packet.
+    {
+        auto gaps = std::make_shared<SourceGapLog>();
+        PacketQueueDevice device(10 * kPacket, gaps);
+        device.push(numbered(0, 6));
+        device.peek(192 * 4);
+        ok &= expect(device.flushToLiveEdge() == 5 * kPacket, "peek flush: returns the offset of the next packet");
+        device.push(numbered(10, 2));
+        device.finish();
+        for (const int n : {0, 1, 2, 3, 4, 10, 11}) {
+            ok &= expect(device.read(kPacket) == numbered(n), "peek flush: packet " + std::to_string(n) + " intact");
+        }
+        unsigned causes = 0;
+        ok &= expect(gaps->takeUpTo(5 * kPacket, &causes) && causes == SourceGapLog::LiveEdge && !gaps->next(),
+                     "peek flush: one gap after the fifth packet");
+    }
+
     ok &= expect(moq2ts::detectTsPacketSize(numbered(0, 4)) == 188, "detect 188");
     ok &= expect(moq2ts::detectTsPacketSize(QByteArray(10, char(0))) == 0, "detect nothing");
     return ok ? 0 : 1;

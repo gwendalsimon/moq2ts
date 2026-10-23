@@ -21,9 +21,12 @@ QString modeName(Mpeg2tsMode mode) {
     return QStringLiteral("per-program");
 }
 
-} // namespace
+QString initRefId(const MsftsCatalog& catalog) {
+    return QStringLiteral("init-") + catalog.track;
+}
 
-QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
+// Appends the media track, then the timeline track when one is named.
+void appendTracks(const MsftsCatalog& catalog, QJsonArray& tracks) {
     QJsonObject mediaTrack;
     mediaTrack.insert(QStringLiteral("name"), catalog.track);
     if (!catalog.namespaceName.isEmpty()) {
@@ -94,12 +97,10 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     // silently dropped by a conformant receiver, since MSFTS tells parsers to
     // ignore fields they do not understand, leaving a filtered track with no PSI
     // bootstrap at all.
-    const QString initRefId = QStringLiteral("init-") + catalog.track;
     if (!catalog.initData.isEmpty()) {
-        mediaTrack.insert(QStringLiteral("initRef"), initRefId);
+        mediaTrack.insert(QStringLiteral("initRef"), initRefId(catalog));
     }
 
-    QJsonArray tracks;
     tracks.append(mediaTrack);
 
     if (!catalog.timelineTrack.isEmpty()) {
@@ -121,29 +122,50 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
 
         tracks.append(timelineTrack);
     }
+}
 
+} // namespace
+
+QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
+    return catalogJson(QList<MsftsCatalog>{catalog});
+}
+
+QByteArray MsftsMuxer::catalogJson(const QList<MsftsCatalog>& catalogs) {
+    QJsonArray tracks;
+    for (const MsftsCatalog& catalog : catalogs) {
+        appendTracks(catalog, tracks);
+    }
+
+    // Root fields come from the first entry. An empty list gives a catalog
+    // with no tracks.
+    const MsftsCatalog first = catalogs.isEmpty() ? MsftsCatalog{} : catalogs.first();
     QJsonObject root;
     // MSF-01 5.1.1 makes version a String and says to write "draft-XX" against
     // Internet-Draft releases; MSFTS 2 requires the value specified by the MSF
     // revision it references, which is draft-ietf-moq-msf-01. No "format" field is
     // emitted: it exists in neither document.
-    root.insert(QStringLiteral("version"), catalog.msfVersion);
-    if (catalog.isLive && catalog.generatedAtMs > 0) {
+    root.insert(QStringLiteral("version"), first.msfVersion);
+    if (first.isLive && first.generatedAtMs > 0) {
         // SHOULD NOT be included when isLive is false (MSF 5.1.6).
-        root.insert(QStringLiteral("generatedAt"), catalog.generatedAtMs);
+        root.insert(QStringLiteral("generatedAt"), first.generatedAtMs);
     }
     root.insert(QStringLiteral("tracks"), tracks);
     QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Compact);
-    if (!catalog.initData.isEmpty()) {
+    QJsonArray initDataList;
+    for (const MsftsCatalog& catalog : catalogs) {
+        if (catalog.initData.isEmpty()) {
+            continue;
+        }
         // MSF 5.1.7: each entry is {id, type, data}; MSFTS fixes type to
         // "inline" and requires the decoded data to be whole source packets, which
         // it is because collectInitData() only ever captures complete TS packets.
         QJsonObject initEntry;
-        initEntry.insert(QStringLiteral("id"), initRefId);
+        initEntry.insert(QStringLiteral("id"), initRefId(catalog));
         initEntry.insert(QStringLiteral("type"), QStringLiteral("inline"));
         initEntry.insert(QStringLiteral("data"), QString::fromLatin1(catalog.initData.toBase64()));
-        QJsonArray initDataList;
         initDataList.append(initEntry);
+    }
+    if (!initDataList.isEmpty()) {
         // MSF 5.1.7: the list MUST be located after the tracks array.
         // QJsonObject keeps its keys sorted, which would put "initDataList"
         // first, so the list is appended to the serialized root instead.
@@ -324,6 +346,16 @@ bool MsftsMuxer::catalogFromJson(const QByteArray& json,
                         .arg(unsupportedMode));
     }
     return fail(QStringLiteral("Catalog has no mpeg2ts-packaged track."));
+}
+
+qint64 workedOutMuxRate(qint64 measuredBps) {
+    if (measuredBps <= 0) {
+        return 0;
+    }
+    constexpr qint64 step = 10000;
+    // measuredBps * 1.10 in integers: ceil(measuredBps * 11 / 10), then up to a step.
+    const qint64 padded = (measuredBps * 11 + 9) / 10;
+    return (padded + step - 1) / step * step;
 }
 
 } // namespace moq2ts
