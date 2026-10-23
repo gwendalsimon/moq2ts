@@ -89,12 +89,18 @@ public:
     static bool supportsDraft(int draft);
     static QString supportedDrafts();
 
-    // How long moqxr waits for a subscriber before it ends the publish with
-    // success (PublisherConfig::subscriber_timeout). A live source waits for
-    // as long as it runs: subscribers come and go, and the time without one
-    // has no bound. moqxr v0.4.10 has no "no timeout" value (0 ends the wait
-    // at once), so it is 10 years, which still fits a steady_clock deadline.
-    // A file keeps a bounded wait.
+    // True when the moqxr built against has
+    // PublisherConfig::await_subscriber_indefinitely, which a live source
+    // sets: the wait for a subscriber then has no deadline.
+    static bool awaitsSubscriberIndefinitely();
+    // PublisherConfig::subscriber_timeout. A live source waits for as long as
+    // it runs: subscribers come and go, and the time without one has no
+    // bound. With await_subscriber_indefinitely, the timeout only bounds
+    // request-stream reads and keeps the moqxr default, 30 s. Without it
+    // (moqxr v0.4.8 and v0.4.10), moqxr ends the publish with success once
+    // the timeout passes without a subscriber, and has no "no timeout" value
+    // (0 ends the wait at once), so it is 10 years, which still fits a
+    // steady_clock deadline. A file keeps a bounded wait.
     static std::chrono::seconds subscriberTimeout(bool liveSource);
     // Why a publish that moqxr ended without an error ended too soon, or empty
     // when it ended as moq2ts asked: running turned false, publisherStopped

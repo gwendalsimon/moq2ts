@@ -93,6 +93,19 @@ std::optional<openmoq::publisher::DraftVersion> toDraftVersion(int draft) {
     }
 }
 
+// PublisherConfig::await_subscriber_indefinitely is newer than moqxr v0.4.10:
+// set it only when the moqxr built against has it. A template, so that the
+// discarded branch is not checked against a Config without the field.
+template <typename Config>
+constexpr bool kHasAwaitSubscriberIndefinitely = requires(Config config) { config.await_subscriber_indefinitely; };
+
+template <typename Config>
+void setAwaitSubscriberIndefinitely(Config& config, bool enabled) {
+    if constexpr (kHasAwaitSubscriberIndefinitely<Config>) {
+        config.await_subscriber_indefinitely = enabled;
+    }
+}
+
 #endif
 
 } // namespace
@@ -180,6 +193,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         publisherConfig.paced = false;
         publisherConfig.loop = false;
         publisherConfig.subscriber_timeout = subscriberTimeout(cfg.liveSource);
+        setAwaitSubscriberIndefinitely(publisherConfig, cfg.liveSource);
 
         openmoq::publisher::LiveObjectSource source;
         source.tracks.push_back({.track_name = kCatalogTrackName});
@@ -405,8 +419,19 @@ QString MoqxrPublisher::supportedDrafts() {
     return QStringLiteral("14, 16, 17, 18, 21 or 22");
 }
 
+bool MoqxrPublisher::awaitsSubscriberIndefinitely() {
+#ifdef MOQ2TS_HAS_MOQXR
+    return kHasAwaitSubscriberIndefinitely<openmoq::publisher::PublisherConfig>;
+#else
+    return false;
+#endif
+}
+
 std::chrono::seconds MoqxrPublisher::subscriberTimeout(bool liveSource) {
-    return liveSource ? std::chrono::hours(24 * 365 * 10) : std::chrono::seconds(120);
+    if (!liveSource) {
+        return std::chrono::seconds(120);
+    }
+    return awaitsSubscriberIndefinitely() ? std::chrono::seconds(30) : std::chrono::hours(24 * 365 * 10);
 }
 
 QString MoqxrPublisher::unexpectedEndReason(bool liveSource, bool running, bool publisherStopped, bool sourceEnded) {

@@ -24,8 +24,16 @@ int main() {
     // waited subscriber_timeout for one, and a live publisher must outlast
     // any time without a subscriber. A file keeps its bounded wait.
     using moq2ts::MoqxrPublisher;
-    check(MoqxrPublisher::subscriberTimeout(true) >= std::chrono::hours(24 * 365),
-          "a live source waits for subscribers without a practical bound");
+    if (MoqxrPublisher::awaitsSubscriberIndefinitely()) {
+        // A moqxr with PublisherConfig::await_subscriber_indefinitely: the
+        // wait has no deadline, and the timeout only bounds request-stream
+        // reads, so it keeps the moqxr default.
+        check(MoqxrPublisher::subscriberTimeout(true) == std::chrono::seconds(30),
+              "with an unlimited wait, a live source keeps moqxr's 30 s timeout for request-stream reads");
+    } else {
+        check(MoqxrPublisher::subscriberTimeout(true) >= std::chrono::hours(24 * 365),
+              "a live source waits for subscribers without a practical bound");
+    }
     check(MoqxrPublisher::subscriberTimeout(false) == std::chrono::seconds(120),
           "a file source keeps its 120 s wait for a subscriber");
     // moqxr adds the timeout to steady_clock::now(), in nanoseconds: the sum
