@@ -47,6 +47,8 @@ struct PublishState {
     // The catalog as published, and the group of its last catalog object.
     MsftsCatalog catalog;
     std::uint64_t catalogGroupId = 0;
+    // The catalog that ends a live broadcast has gone out.
+    bool broadcastEnded = false;
     std::shared_ptr<M2tsPacketizer> packetizer;   // file / SRT path
     std::shared_ptr<void> capture;                // capture path (LibavCaptureSource)
 };

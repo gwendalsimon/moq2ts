@@ -37,6 +37,9 @@ struct PublishedObject {
     // True when no later object shares this group (a timeline or catalog
     // object), so the publisher closes the group without looking ahead.
     bool finalInGroup = false;
+    // The closing catalog of MSF -01 Section 11.3, the source's last object:
+    // moqxr ends every other track (PUBLISH_DONE) before sending it.
+    bool endsBroadcast = false;
 };
 
 class IMoqOutput {
