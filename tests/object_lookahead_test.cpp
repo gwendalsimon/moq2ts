@@ -191,6 +191,21 @@ int main() {
         ok &= expect(got == "a/0/0F a.timeline/0/0F ", "end of source: media, then timeline: " + got);
     }
 
+    // The Object that ends the broadcast (MSF -01 Section 11.3) follows the
+    // held last Object of every track, not the other way round.
+    {
+        Script script;
+        PublishedObject closing = object("catalog", 2, 0, true);
+        closing.endsBroadcast = true;
+        script.objects = {object("a", 0, 0), object("b", 0, 0), closing};
+        ObjectLookahead lookahead(script.source());
+        std::string got;
+        while (const auto next = lookahead.next()) {
+            got += name(*next) + " ";
+        }
+        ok &= expect(got == "a/0/0F b/0/0F catalog/2/0F ", "closing catalog goes out last: " + got);
+    }
+
     std::cerr << (ok ? "OK\n" : "FAILED\n");
     return ok ? 0 : 1;
 }

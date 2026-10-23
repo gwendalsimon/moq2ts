@@ -245,6 +245,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 // the first Object, and the subgroup FIN then ends the Group.
                 .subgroup_contains_group_largest = true,
                 .final_in_subgroup = ready->finalInGroup,
+                .ends_broadcast = ready->object.endsBroadcast,
             };
         };
 
@@ -328,7 +329,8 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
         const PublishedObject* object = &ready->object;
         qDebug() << "MOCK MSFTS publish" << object->trackName << "group=" << object->groupId
                  << "object=" << object->objectId << "bytes=" << object->payload.size()
-                 << "final=" << ready->finalInGroup;
+                 << "final=" << ready->finalInGroup
+                 << (object->endsBroadcast ? "ends_broadcast" : "");
         ++publisherObjects;
         publisherBytes += object->payload.size();
         emit framePublished(object->trackName, publisherBytes, publisherObjects);

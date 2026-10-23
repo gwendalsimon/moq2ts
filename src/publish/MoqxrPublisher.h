@@ -47,6 +47,9 @@ struct PublishedObject {
     // Object records a media Object (MSF -01 Section 7: data about previously
     // published Groups). Empty when it depends on none.
     QString afterTrack;
+    // The closing catalog of MSF -01 Section 11.3, the source's last object:
+    // moqxr ends every other track (PUBLISH_DONE) before sending it.
+    bool endsBroadcast = false;
 };
 
 class IMoqOutput {

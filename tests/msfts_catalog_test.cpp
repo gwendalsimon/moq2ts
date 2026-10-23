@@ -204,6 +204,23 @@ int main() {
         ok &= expect(!accepted && error.contains("es-packets"), "es-packets track is skipped");
     }
 
+    // The catalog that ends a live broadcast (MSF Section 11.3): isComplete
+    // true and an empty tracks array, after the version and generatedAt
+    // (example of Section 5.6.13).
+    {
+        MsftsCatalog live = baseCatalog(Mpeg2tsMode::UnmodifiedProgram);
+        live.generatedAtMs = 1746104606044;
+        const QByteArray json = MsftsMuxer::completeCatalogJson(live);
+        const QJsonObject root = QJsonDocument::fromJson(json).object();
+        ok &= expect(root.value("version").toString() == "draft-01", "complete catalog: version");
+        ok &= expect(static_cast<qint64>(root.value("generatedAt").toDouble()) == 1746104606044,
+                     "complete catalog: generatedAt");
+        ok &= expect(root.value("isComplete").toBool(), "complete catalog: isComplete true");
+        ok &= expect(root.value("tracks").isArray() && root.value("tracks").toArray().isEmpty(),
+                     "complete catalog: empty tracks");
+        ok &= expect(!root.contains("initDataList") && root.size() == 4, "complete catalog: no other field");
+    }
+
     // Legacy boolean keys still map to a mode.
     {
         MsftsCatalog parsed;
