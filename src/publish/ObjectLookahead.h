@@ -35,7 +35,9 @@ struct ReadyObject {
 // once, unless it describes a track that holds an Object (afterTrack): a
 // timeline Object then goes out right after the media Object it records,
 // which MSF -01 Section 7 requires to be published first. At the end of the
-// source, the held Objects go out as final, in the order they arrived.
+// source, the held Objects go out as final, in the order they arrived. An
+// Object that ends the broadcast (endsBroadcast) is the source's last: the
+// held Objects go out first, so it follows every Object it closes.
 class ObjectLookahead {
 public:
     explicit ObjectLookahead(std::function<std::optional<PublishedObject>()> source)
@@ -50,6 +52,11 @@ public:
                 m_ended = true;
                 releaseAll();
                 break;
+            }
+            if (object->endsBroadcast) {
+                releaseAll();
+                m_ready.push_back({std::move(*object), true});
+                continue;
             }
             const auto held = m_held.find(object->trackName);
             if (held != m_held.end()) {

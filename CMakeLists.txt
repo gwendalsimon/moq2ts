@@ -485,4 +485,10 @@ if(UNIX AND NOT APPLE)
     target_include_directories(moq2ts-object-lookahead-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(moq2ts-object-lookahead-tests PRIVATE moq2ts-core)
     add_test(NAME moq2ts-object-lookahead-tests COMMAND moq2ts-object-lookahead-tests)
+
+    # The pipeline against the mock transport: how a live source ends.
+    add_executable(moq2ts-live-pipeline-end-tests tests/live_pipeline_end_test.cpp)
+    target_include_directories(moq2ts-live-pipeline-end-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-live-pipeline-end-tests PRIVATE moq2ts-core ${CORE_QT_LIBS})
+    add_test(NAME moq2ts-live-pipeline-end-tests COMMAND moq2ts-live-pipeline-end-tests)
 endif()
