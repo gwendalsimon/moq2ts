@@ -8,6 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CMAKE="$REPO_ROOT/CMakeLists.txt"
+CLI="$REPO_ROOT/src/cli/main_cli.cpp"
 
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 
@@ -19,7 +20,7 @@ UNIX_ONLY=(
 )
 
 core_sources="$(awk '/^set\(CORE_SOURCES/{on=1; next} on && /^\)/{exit} on' "$CMAKE")"
-for f in "${UNIX_ONLY[@]}" src/media/PacketQueueDevice.cpp; do
+for f in "${UNIX_ONLY[@]}" src/media/PacketQueueDevice.cpp src/app/PublisherSpec.cpp; do
   if grep -qF "$f" <<<"$core_sources"; then
     fail "$f is in the unconditional CORE_SOURCES, which the Windows build compiles"
   fi
@@ -27,6 +28,8 @@ done
 
 grep -q 'if(MOQ2TS_ENABLE_MPTS AND UNIX)' "$CMAKE" \
   || fail "CMakeLists.txt must add the MPTS sources only on UNIX"
+grep -q '#ifdef MOQ2TS_HAS_MPTS' "$CLI" \
+  || fail "main_cli.cpp must guard --config with MOQ2TS_HAS_MPTS"
 
 posix='^[[:space:]]*#[[:space:]]*include[[:space:]]*<(unistd|poll|fcntl|netdb|pthread|dlfcn|termios|sys/[^>]*|arpa/[^>]*|netinet/[^>]*|linux/[^>]*)[.]h>'
 while IFS= read -r file; do

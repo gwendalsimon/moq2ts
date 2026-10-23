@@ -314,20 +314,23 @@ endif()
 
 # Per-program (MPTS) publishing, as SRT ingest above: MptsFanOut.cpp and
 # MptsPipeline.cpp include POSIX headers (poll.h, unistd.h, fcntl.h, sys/stat.h)
-# that MSVC lacks, so the MPTS files are compiled only on UNIX. The option
+# that MSVC lacks, so the four MPTS files are compiled only on UNIX, and
+# MOQ2TS_HAS_MPTS tells the CLI whether --config can be honoured. The option
 # makes the excluded build reachable on a UNIX host, to test it.
-option(MOQ2TS_ENABLE_MPTS "Build per-program (MPTS) publishing" ON)
+option(MOQ2TS_ENABLE_MPTS "Build per-program (MPTS) publishing, --config" ON)
 set(MOQ2TS_MPTS_BUILT FALSE)
 if(MOQ2TS_ENABLE_MPTS AND UNIX)
     target_sources(moq2ts-core PRIVATE
         src/media/PacketQueueDevice.cpp src/media/PacketQueueDevice.h
         src/media/MptsFanOut.cpp src/media/MptsFanOut.h
         src/media/MptsPipeline.cpp src/media/MptsPipeline.h
+        src/app/PublisherSpec.cpp src/app/PublisherSpec.h
     )
+    target_compile_definitions(moq2ts-core PUBLIC MOQ2TS_HAS_MPTS)
     set(MOQ2TS_MPTS_BUILT TRUE)
     message(STATUS "Per-program (MPTS) publishing enabled")
 else()
-    message(STATUS "Per-program (MPTS) publishing disabled (MOQ2TS_ENABLE_MPTS=OFF or unsupported platform)")
+    message(STATUS "Per-program (MPTS) publishing disabled (MOQ2TS_ENABLE_MPTS=OFF or unsupported platform); --config will be rejected")
 endif()
 
 if(MOQXR_PUBLISH_FOUND)
@@ -537,4 +540,9 @@ if(UNIX AND NOT APPLE AND MOQ2TS_MPTS_BUILT)
     target_link_libraries(moq2ts-mpts-pipeline-tests PRIVATE moq2ts-core)
     add_test(NAME moq2ts-mpts-pipeline-tests COMMAND moq2ts-mpts-pipeline-tests)
     set_tests_properties(moq2ts-mpts-pipeline-tests PROPERTIES TIMEOUT 180)
+
+    add_executable(moq2ts-publisher-spec-tests tests/publisher_spec_test.cpp)
+    target_include_directories(moq2ts-publisher-spec-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-publisher-spec-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-publisher-spec-tests COMMAND moq2ts-publisher-spec-tests)
 endif()
