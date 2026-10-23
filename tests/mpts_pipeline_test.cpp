@@ -269,9 +269,13 @@ public:
                 return true;
             }
             const PublishedObject& object = ready->object;
-            qDebug() << "MOCK MSFTS publish" << object.trackName << "group=" << object.groupId
-                     << "object=" << object.objectId << "bytes=" << object.payload.size()
-                     << "final=" << ready->finalInGroup;
+            QDebug line = qDebug();
+            line << "MOCK MSFTS publish" << object.trackName << "group=" << object.groupId
+                 << "object=" << object.objectId << "bytes=" << object.payload.size()
+                 << "final=" << ready->finalInGroup;
+            if (object.endsBroadcast) {
+                line << "ends_broadcast";
+            }
             std::lock_guard<std::mutex> lock(m_mutex);
             m_sent.push_back(std::move(*ready));
         }
@@ -541,6 +545,12 @@ int main() {
         ok &= expect(catalogTracks(run.catalog) == QStringList({"program-101", "program-101.timeline", "program-102",
                                                                 "program-102.timeline"}),
                      "two programs: catalog lists four tracks: " + run.catalog.toStdString());
+        // The source ended cleanly: its last Object is the closing catalog
+        // of MSF -01 Section 11.3, after every media Object, and only one.
+        ok &= expect(tracks.count(QStringLiteral("catalog")) == 1, "two programs: one closing catalog");
+        ok &= expect(!run.log.isEmpty() && run.log.last().contains(QStringLiteral("publish \"catalog\"")) &&
+                         run.log.last().contains(QStringLiteral("ends_broadcast")),
+                     "two programs: the closing catalog is the last Object");
         const QJsonObject first = catalogTrack(run.catalog, QStringLiteral("program-101"));
         const QJsonObject second = catalogTrack(run.catalog, QStringLiteral("program-102"));
         ok &= expect(first.value(QStringLiteral("mpeg2tsMode")).toString() == QStringLiteral("per-program"),
@@ -601,7 +611,8 @@ int main() {
         ok &= expect(run.errors.isEmpty(), "PMT change: no error: " + joined(run.errors));
         ok &= expect(catalogSeen, "PMT change: the new catalog goes out");
         const QStringList tracks = publishedTracks(run.log);
-        ok &= expect(tracks.count(QStringLiteral("catalog")) == 1, "PMT change: one new catalog Object");
+        // The new catalog, then the closing one when the source ends.
+        ok &= expect(tracks.count(QStringLiteral("catalog")) == 2, "PMT change: one new catalog Object");
         ok &= expect(tracks.count(QStringLiteral("program-102")) > program102BeforeChange,
                      "PMT change: program 102 keeps publishing after the new catalog");
         ok &= expect(catalogTracks(run.catalog).size() == 4, "PMT change: the new catalog lists every track");
@@ -645,6 +656,10 @@ int main() {
         ok &= expect(run.errors.isEmpty(), "program ends: no pipeline error: " + joined(run.errors));
         ok &= expect(run.ended == QStringList({"101: Program 101 left the source PAT; the track ends."}),
                      "program ends: programEnded says which and why: " + joined(run.ended));
+        // A program that ended on an error makes no commitment that no content
+        // follows: no closing catalog.
+        ok &= expect(publishedTracks(run.log).count(QStringLiteral("catalog")) == 0,
+                     "program ends: no closing catalog after an error");
         qsizetype last101 = -1;
         qsizetype after = 0;
         for (qsizetype i = 0; i < run.log.size(); ++i) {
