@@ -75,6 +75,27 @@ PublishedObject updateCatalog(PublishState* st, const QByteArray& initData) {
     return catalog;
 }
 
+// Once a live source ends, the independent catalog that ends the broadcast
+// for good (MSF -01 Section 11.3). Section 11.3 sends PUBLISH_DONE with Track
+// Ended first: moqxr holds an object marked endsBroadcast until it has ended
+// every other track. A VOD track gets nothing more.
+std::optional<PublishedObject> endBroadcast(PublishState* st) {
+    if (!st->catalog.isLive || st->broadcastEnded) {
+        return std::nullopt;
+    }
+    st->broadcastEnded = true;
+    st->catalog.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
+    PublishedObject catalog;
+    catalog.trackName = QStringLiteral("catalog");
+    catalog.payload = MsftsMuxer::completeCatalogJson(st->catalog);
+    catalog.groupId = ++st->catalogGroupId;
+    catalog.objectId = 0;
+    catalog.startsGroup = true;
+    catalog.finalInGroup = true;
+    catalog.endsBroadcast = true;
+    return catalog;
+}
+
 } // namespace
 
 PublishedObject timelineObject(TimelineHistory* history,
@@ -239,7 +260,7 @@ void LivePipeline::runLoop() {
         // Track name defaults to "program-1" when not supplied by other means.
         const QString trackName = QStringLiteral("program-1");
         const QString timelineTrackName = trackName + QStringLiteral(".timeline");
-        const QByteArray catalog = MsftsMuxer::catalogJson({
+        const MsftsCatalog catalogSpec{
             .track = trackName,
             .packetSize = capture.packetSize(),
             .packetsPerObject = packetsPerObject,
@@ -251,9 +272,11 @@ void LivePipeline::runLoop() {
             .isLive = true,
             .bitrateBps = static_cast<qint64>(m_config.videoTargetBitrateKbps) * 1000,
             .generatedAtMs = QDateTime::currentMSecsSinceEpoch(),
-        });
+        };
+        const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
 
         auto st = std::make_shared<PublishState>();
+        st->catalog = catalogSpec;
         st->capture = capturePtr;   // keeps the source alive alongside the counters
         auto* capturePtrRaw = capturePtr.get();
 
@@ -272,8 +295,11 @@ void LivePipeline::runLoop() {
             if (!(*capturePtrRaw).readObject(packetsPerObject, &object, m_running, &readError)) {
                 if (!readError.isEmpty()) {
                     emit error(readError);
+                    return std::nullopt;
                 }
-                return std::nullopt;
+                // Only a clean end of the source ends the broadcast: not an
+                // error, and not an interrupt.
+                return m_running.load(std::memory_order_acquire) ? endBroadcast(st.get()) : std::nullopt;
             }
 
             const bool startsGroup = object.startsGroup;
@@ -444,8 +470,12 @@ void LivePipeline::runLoop() {
         if (!(*st->packetizer).readObject(packetsPerObject, &object, &readError)) {
             if (!readError.isEmpty()) {
                 emit error(readError);
+                return std::nullopt;
             }
-            return std::nullopt;
+            // Only a clean end of the source ends the broadcast: not an error,
+            // and not an interrupt, which closes the SRT pipe after it clears
+            // m_running.
+            return m_running.load(std::memory_order_acquire) ? endBroadcast(st.get()) : std::nullopt;
         }
         if (m_config.resyncPid) {
             m_config.resyncPid->store(st->packetizer->groupPid(), std::memory_order_relaxed);
