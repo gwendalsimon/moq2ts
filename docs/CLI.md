@@ -191,7 +191,7 @@ ffmpeg -hide_banner -re \
 
 `-g 50` at 25 fps gives a random access point every 2 s. MSFTS-02 sets no
 maximum Group duration. To check received source packets against the sent feed,
-see the end-to-end test in [tests/srt-mpts-e2e.sh](../tests/srt-mpts-e2e.sh).
+see "End-to-end tests" below.
 
 A multi-program feed is published as one `unmodified-multiplex` track:
 
@@ -365,18 +365,40 @@ The once-per-second readout includes checks corresponding to
 [ETSI TR 101 290 section 5.2](https://www.etsi.org/deliver/etsi_tr/101200_101299/101290/01.04.01_60/tr_101290v010401p.pdf);
 this is a subset of the standard's full monitoring checks.
 
-For a two-program SRT relay check with byte-level source comparison:
+### End-to-end tests
+
+Three scripts in `tests/` run the real publisher and receiver through a relay.
+They are not part of `ctest` or CI, because they need a real build, an installed
+moq5, and a draft-22 relay:
+
+| Script | Checks |
+| --- | --- |
+| `srt-mpts-e2e.sh` | Two-program SRT feed, published as one multiplex track; the capture is byte-identical to the source |
+| `mpts-per-program-e2e.sh` | `--config` with an SRT listener; each program arrives as its own track with only its PIDs and no continuity error |
+| `mpts-end-broadcast-e2e.sh` | `--config` with a FIFO source that ends; every receiver sees the broadcast end (the closing catalog of MSF -01 Section 11.3, `[rx] track ended`) long before its own `--duration` |
+
+By default a script starts a local `moq5-relay` (draft 22, loopback, a
+throwaway certificate), so a run publishes to no public service. Point
+`MOQ5_RELAY` at the binary, built from moq5 main with the MsQuic managed
+facade (`MOQ_BUILD_ADAPTER_MSQUIC=ON`, `MOQ_BUILD_MSQUIC_MANAGED=ON`).
+`MOQ5_RELAY_LD_LIBRARY_PATH` adds a library path the relay needs, such as the
+MsQuic build directory:
 
 ```bash
-RELAY_URL=moqt://127.0.0.1:4433 \
+MOQ5_RELAY=/path/to/moq5-relay \
 MOQ2TS_CLI=./build/moq2ts-cli \
 MOQ2TS_RECEIVER=./build-receiver/moq2ts-receiver \
-tests/srt-mpts-e2e.sh
+tests/mpts-end-broadcast-e2e.sh
 ```
 
-The script reports any MOQT gaps; it requires real media, source-identical
-packets, and two decodable program entries. It leaves its capture and logs in
-the printed temporary directory.
+Set `RELAY_URL` to use an existing relay instead, for example
+`RELAY_URL=moqt://127.0.0.1:4433`; the local relay is then not started. The
+receiver needs moq5 built with the `service` and `mpeg2ts` targets, and moq5 with
+`MOQ_BUILD_PQ_THREADED=ON` for `moqt://` endpoints.
+
+Each script reports any MOQT gaps, requires real media, and leaves its capture
+and logs in the printed temporary directory when it fails. `srt-mpts-e2e.sh`
+also requires source-identical packets and two decodable program entries.
 
 ## Verify byte-faithful passthrough
 
