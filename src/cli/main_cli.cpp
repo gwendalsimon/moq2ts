@@ -151,6 +151,10 @@ int main(int argc, char** argv) {
              QStringLiteral("version"), QStringLiteral("22"));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-si"),
         QStringLiteral("Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT), with the SDT and EIT reduced to the carried service.")));
+    addValue(QStringLiteral("si"),
+             QStringLiteral("Per-program mode: keep these DVB SI tables, a comma-separated list of nit, sdt, bat, "
+                            "eit-pf, eit-schedule, tdt-tot, or all. Cannot be combined with --retain-si."),
+             QStringLiteral("list"));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-null"),
         QStringLiteral("Per-program mode: also keep null (0x1FFF) packets.")));
     // SRT ingest source (alternative to --video file).
@@ -191,7 +195,21 @@ int main(int argc, char** argv) {
                                           moq2ts::MoqxrPublisher::supportedDrafts()));
         return 2;
     }
-    cfg.retainSiTables = parser.isSet(QStringLiteral("retain-si"));
+    const bool retainSi = parser.isSet(QStringLiteral("retain-si"));
+    if (retainSi) {
+        cfg.siTables = moq2ts::allSiTables();
+    }
+    if (parser.isSet(QStringLiteral("si"))) {
+        if (retainSi) {
+            logLine(stderr, "error", QStringLiteral("--si and --retain-si cannot be combined; --retain-si means --si all."));
+            return 2;
+        }
+        QString siError;
+        if (!moq2ts::parseSiTables(parser.value(QStringLiteral("si")), &cfg.siTables, &siError)) {
+            logLine(stderr, "error", QStringLiteral("--si: %1").arg(siError));
+            return 2;
+        }
+    }
     cfg.retainNullPackets = parser.isSet(QStringLiteral("retain-null"));
 
     // SRT ingest: if --srt-config is set, parse the JSON, connect to the first
@@ -326,8 +344,10 @@ int main(int argc, char** argv) {
         // indistinguishable from a bug in the filter itself.
         if (!cfg.transparentMode) {
             QStringList ignored;
-            if (cfg.retainSiTables) {
+            if (retainSi) {
                 ignored << QStringLiteral("--retain-si");
+            } else if (!cfg.siTables.isEmpty()) {
+                ignored << QStringLiteral("--si");
             }
             if (cfg.retainNullPackets) {
                 ignored << QStringLiteral("--retain-null");

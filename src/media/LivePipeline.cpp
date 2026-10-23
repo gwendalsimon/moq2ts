@@ -342,7 +342,7 @@ void LivePipeline::runLoop() {
     M2tsPacketizer& packetizer = *packetizerPtr;
     // MSFTS carriage-profile knobs (msfts#7); must be set before open().
     packetizer.setTransparent(m_config.transparentMode);
-    packetizer.setRetainSiTables(m_config.retainSiTables);
+    packetizer.setSiTables(m_config.siTables);
     packetizer.setRetainNullPackets(m_config.retainNullPackets);
     packetizer.setSourceGaps(m_config.sourceGaps);
     QString packetizerError;

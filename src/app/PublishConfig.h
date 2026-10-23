@@ -1,9 +1,12 @@
 #pragma once
 
+#include <QSet>
 #include <QString>
 
 #include <atomic>
 #include <memory>
+
+#include "../media/SiTables.h"
 
 namespace moq2ts {
 
@@ -42,7 +45,9 @@ struct PublishConfig {
     // MSFTS carriage-profile options (draft-gregoire-moq-msfts feedback, msfts#7).
     // Defaults preserve the historical filtered single-program behavior.
     bool transparentMode = false;   // carry the whole multiplex verbatim (no filter/rewrite)
-    bool retainSiTables = false;    // filtered path: also keep SDT/EIT/TDT-TOT/NIT PIDs
+    // filtered path: the SI tables to keep (--si, or all of them for
+    // --retain-si); none when empty.
+    QSet<SiTable> siTables;
     bool retainNullPackets = false; // filtered path: also keep null (0x1FFF) packets
     int mpeg2tsMuxRateBps = 0;      // advisory source mux rate; 0 omits the catalog hint
     bool pacedFileSource = false;    // pace file-source publishing at media-time rate

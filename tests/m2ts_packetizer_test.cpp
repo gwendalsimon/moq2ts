@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QFile>
 #include <QMap>
+#include <QSet>
 #include <QStringList>
 #include <QtGlobal>
 #include <QTemporaryDir>
@@ -614,6 +615,84 @@ int main() {
         ok &= expect(tdtOut.size() == 2 && tdtOut.at(0) == ts.mid(ts.indexOf(tb::psiPacket(0x0014, tdt, 0)), 188),
                      "SI: TDT passes unchanged");
         ok &= expect(!pids(publish(path, false, 1, false)).contains(0x0011), "SI: without --retain-si, no SI is kept");
+    }
+
+    // SI table selection: only the chosen tables stay. SDT and BAT share PID
+    // 0x0011, and EIT present/following and schedule share PID 0x0012; the PID
+    // is retained when either is chosen and the other's sections go.
+    {
+        const QByteArray sdtActual = tb::longSection(0x42, 1, tb::sdtBody(0x22, {{1, {}}}));
+        const QByteArray bat = tb::longSection(0x4A, 0x1234, QByteArray("\xF0\x00\xF0\x00", 4));
+        const QByteArray eitPf = tb::longSection(0x4E, 1, QByteArray(6, char(0)));
+        const QByteArray eitSchedule = tb::longSection(0x50, 1, QByteArray(6, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        int sdtCc = 0;
+        for (const QByteArray& section : {sdtActual, bat}) {
+            ts += tb::psiPacket(0x0011, section, sdtCc++);
+        }
+        int eitCc = 0;
+        for (const QByteArray& section : {eitPf, eitSchedule}) {
+            ts += tb::psiPacket(0x0012, section, eitCc++);
+        }
+        ts += tb::psiPacket(0x0014, QByteArray("\x70\x70\x05\xE0\x00\x12\x00\x00", 8), 0);
+        const QString path = dir.filePath("si-select.ts");
+        ok &= expect(writeFile(path, ts), "write SI selection stream");
+
+        // The sections that a PID carries after the selection, and the PIDs it advertises.
+        const auto selected = [&](const QSet<moq2ts::SiTable>& tables, QList<int>* siPids, int pid) {
+            M2tsPacketizer packetizer(path);
+            packetizer.setSiTables(tables);
+            QString error;
+            QList<QByteArray> sections;
+            if (!packetizer.open(1, &error)) {
+                return sections;
+            }
+            if (siPids != nullptr) {
+                *siPids = packetizer.retainedSiPids();
+            }
+            moq2ts::PsiAssembler assembler;
+            M2tsObject object;
+            while (packetizer.readObject(1, &object, &error)) {
+                if (pidOfPacket(object.payload) == pid) {
+                    for (const auto& section : assembler.push(object.payload, object.payload)) {
+                        sections.append(section.bytes);
+                    }
+                }
+            }
+            return sections;
+        };
+        using moq2ts::SiTable;
+        QList<int> siPids;
+        const QSet<SiTable> sdtOnly{SiTable::Sdt};
+        ok &= expect(!selected(sdtOnly, &siPids, 0x0011).isEmpty() && selected(sdtOnly, nullptr, 0x0012).isEmpty() &&
+                         selected(sdtOnly, nullptr, 0x0014).isEmpty() && siPids == QList<int>({0x0011}),
+                     "SI select: sdt only keeps PID 0x0011, drops 0x0012 and 0x0014, retains {0x0011}");
+        ok &= expect(selected(sdtOnly, nullptr, 0x0011).size() == 1 && selected(sdtOnly, nullptr, 0x0011).first()[0] == char(0x42),
+                     "SI select: sdt without bat drops the BAT section on PID 0x0011");
+        const QSet<SiTable> batOnly{SiTable::Bat};
+        ok &= expect(selected(batOnly, &siPids, 0x0011) == QList<QByteArray>({bat}) && siPids == QList<int>({0x0011}),
+                     "SI select: bat without sdt keeps only the BAT section");
+        const QSet<SiTable> eitPfOnly{SiTable::EitPresentFollowing};
+        ok &= expect(selected(eitPfOnly, &siPids, 0x0012) == QList<QByteArray>({eitPf}) && siPids == QList<int>({0x0012}) &&
+                         selected(eitPfOnly, nullptr, 0x0011).isEmpty(),
+                     "SI select: eit-pf only keeps p/f sections, drops schedule, retains {0x0012}");
+        const QSet<SiTable> eitScheduleOnly{SiTable::EitSchedule};
+        ok &= expect(selected(eitScheduleOnly, nullptr, 0x0012) == QList<QByteArray>({eitSchedule}),
+                     "SI select: eit-schedule only keeps schedule sections");
+        ok &= expect(selected(moq2ts::allSiTables(), &siPids, 0x0011) == QList<QByteArray>({selected(sdtOnly, nullptr, 0x0011).first(), bat}) &&
+                         siPids == QList<int>({0x0010, 0x0011, 0x0012, 0x0014}),
+                     "SI select: all tables keeps the retain-si output and PIDs");
+
+        QSet<SiTable> parsed;
+        QString parseError;
+        ok &= expect(moq2ts::parseSiTables(QStringLiteral("sdt, eit-pf,tdt-tot"), &parsed, &parseError) &&
+                         parsed == QSet<SiTable>({SiTable::Sdt, SiTable::EitPresentFollowing, SiTable::TdtTot}),
+                     "SI parse: comma-separated names");
+        ok &= expect(moq2ts::parseSiTables(QStringLiteral("all"), &parsed, &parseError) && parsed == moq2ts::allSiTables(),
+                     "SI parse: all");
+        ok &= expect(!moq2ts::parseSiTables(QStringLiteral("sdt,foo"), &parsed, &parseError) && parseError.contains("foo"),
+                     "SI parse: an unknown name fails and the error names it");
     }
 
     // Mux rate: a CBR SPTS at 3,008,000 bit/s (2,000 packets per second) with

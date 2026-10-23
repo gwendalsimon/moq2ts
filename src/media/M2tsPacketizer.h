@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QFile>
 #include <QList>
+#include <QSet>
 #include <QString>
 
 #include <bitset>
@@ -14,6 +15,8 @@
 #include <set>
 #include <utility>
 #include <vector>
+
+#include "SiTables.h"
 
 namespace moq2ts {
 
@@ -127,7 +130,8 @@ public:
     // MSFTS carriage-profile knobs (msfts#7). Call before open(); defaults
     // preserve the historical filtered single-program behavior.
     void setTransparent(bool transparent);      // unmodified carriage: forward every packet
-    void setRetainSiTables(bool retain);         // keep SDT/EIT/TDT-TOT/NIT PIDs
+    void setRetainSiTables(bool retain);         // all SI tables; setSiTables(allSiTables())
+    void setSiTables(QSet<SiTable> tables);      // keep these SI tables beside the program
     void setRetainNullPackets(bool retain);      // keep null (0x1FFF) packets
     // Live source: where the stream skips ahead (SRT ingest). A Group starts at
     // each gap, and the track starts after a gap found before its first Object.
@@ -143,7 +147,7 @@ public:
     // PID entry. 0 when no PAT was parsed. A source whose PAT lists one program
     // is a single-program transport stream.
     int patProgramCount() const;
-    // DVB SI PIDs kept alongside the selected program by setRetainSiTables().
+    // DVB SI PIDs kept alongside the selected program by setSiTables().
     // Empty unless retention is on, which is what the catalog advertises as
     // mpeg2tsSiPids: PIDs retained in the per-program track beyond the PMT's.
     QList<int> retainedSiPids() const;
@@ -304,7 +308,7 @@ private:
 
     // Carriage-profile state (msfts#7).
     bool m_transparent = false;
-    bool m_retainSiTables = false;
+    QSet<SiTable> m_siTables;
     QList<int> m_retainedSiPids;
     bool m_retainNullPackets = false;
     // True for non-seekable streams (FIFO, /dev/stdin, pipe). In that mode
