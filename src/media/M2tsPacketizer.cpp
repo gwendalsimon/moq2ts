@@ -505,6 +505,10 @@ void M2tsPacketizer::setTimedStartWindows(bool timed) {
     m_timedStartWindows = timed;
 }
 
+void M2tsPacketizer::setLabel(QString label) {
+    m_label = std::move(label);
+}
+
 void M2tsPacketizer::setSourceGaps(std::shared_ptr<SourceGapLog> gaps) {
     m_sourceGaps = std::move(gaps);
 }

@@ -387,6 +387,9 @@ void LivePipeline::runLoop() {
                               : packetizer.namesProgram() ? QStringLiteral("mux-1-p%1").arg(packetizer.programNumber())
                                                           : QStringLiteral("mux-1");
     const QString timelineTrackName = trackName + QStringLiteral(".timeline");
+    // The skip-ahead warnings name the track, not the FIFO that SRT ingest
+    // writes into, as for a multi-program source.
+    packetizer.setLabel(trackName);
     // A non-seekable source (FIFO / stdin / pipe) is a live feed: advertise it as
     // live and skip VOD-only duration probing, which would open and consume the
     // pipe a second time.
