@@ -179,7 +179,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         publisherConfig.publish_catalog = false;
         publisherConfig.paced = false;
         publisherConfig.loop = false;
-        publisherConfig.subscriber_timeout = std::chrono::seconds(120);
+        publisherConfig.subscriber_timeout = subscriberTimeout(cfg.liveSource);
 
         openmoq::publisher::LiveObjectSource source;
         source.tracks.push_back({.track_name = kCatalogTrackName});
@@ -189,6 +189,9 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         }
 
         bool catalogSent = false;
+        // Set once the source has no more Objects: the publish then ends as
+        // moq2ts asked.
+        auto sourceEnded = std::make_shared<std::atomic<bool>>(false);
         int64_t publisherObjects = 0;
         int64_t publisherBytes = 0;
         // final_in_subgroup must mark the last object of a group ON ITS OWN
@@ -203,7 +206,8 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                               publisherObjects,
                               publisherBytes,
                               catalog,
-                              lookahead]() mutable -> std::optional<openmoq::publisher::LiveObject> {
+                              lookahead,
+                              sourceEnded]() mutable -> std::optional<openmoq::publisher::LiveObject> {
             if (!catalogSent) {
                 catalogSent = true;
                 ++publisherObjects;
@@ -224,6 +228,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
 
             std::optional<ReadyObject> ready = lookahead->next();
             if (!ready.has_value()) {
+                sourceEnded->store(true, std::memory_order_release);
                 return std::nullopt;
             }
             const PublishedObject& current = ready->object;
@@ -287,6 +292,14 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
 
         const auto stats = activePublisher->stats();
         emit framePublished(mediaTrackName, static_cast<int64_t>(stats.bytes_published), static_cast<int64_t>(stats.objects_published));
+        const QString unexpectedEnd = unexpectedEndReason(cfg.liveSource, !running.load(std::memory_order_acquire),
+                                                          sourceEnded->load(std::memory_order_acquire));
+        if (!unexpectedEnd.isEmpty()) {
+            qWarning("%s (%llu Objects sent%s%s).", qUtf8Printable(unexpectedEnd),
+                     static_cast<unsigned long long>(stats.objects_published),
+                     stats.last_error.empty() ? "" : "; last error: ", stats.last_error.c_str());
+            return false;
+        }
         return status.ok;
     } catch (const std::exception& error) {
         QMutexLocker locker(&m_mutex);
@@ -381,6 +394,21 @@ bool MoqxrPublisher::supportsDraft(int draft) {
 
 QString MoqxrPublisher::supportedDrafts() {
     return QStringLiteral("14, 16, 17, 18, 21 or 22");
+}
+
+std::chrono::seconds MoqxrPublisher::subscriberTimeout(bool liveSource) {
+    return liveSource ? std::chrono::hours(24 * 365 * 10) : std::chrono::seconds(120);
+}
+
+QString MoqxrPublisher::unexpectedEndReason(bool liveSource, bool stopRequested, bool sourceEnded) {
+    if (!liveSource || stopRequested || sourceEnded) {
+        return {};
+    }
+    // moqxr gives no reason with a success: with no subscriber timeout left
+    // for a live source, its loop ends on its own when the relay ends the
+    // control stream, but other causes cannot be ruled out from here.
+    return QStringLiteral("The MOQT session ended while the live source was still running, without an error from "
+                          "moqxr (the relay may have closed the session); the publish stops");
 }
 
 } // namespace moq2ts

@@ -84,6 +84,11 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 `Ctrl-C` (SIGINT) or SIGTERM stops gracefully. Exit code 0 on clean completion, 1
 on error, 2 on invalid arguments.
 
+A live source (capture, FIFO, pipe, or SRT) waits for subscribers for as long as
+it runs. A file source waits 120 s for its first subscriber. When the session
+ends while a live source still runs, without a stop or the end of the source,
+moq2ts logs a warning that says so and exits with code 1.
+
 ## Run: seekable file
 
 ```bash

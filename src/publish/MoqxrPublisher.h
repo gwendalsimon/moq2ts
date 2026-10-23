@@ -6,6 +6,7 @@
 #include <QStringList>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -87,6 +88,19 @@ public:
     // unsupported value is refused rather than replaced by another draft.
     static bool supportsDraft(int draft);
     static QString supportedDrafts();
+
+    // How long moqxr waits for a subscriber before it ends the publish with
+    // success (PublisherConfig::subscriber_timeout). A live source waits for
+    // as long as it runs: subscribers come and go, and the time without one
+    // has no bound. moqxr v0.4.10 has no "no timeout" value (0 ends the wait
+    // at once), so it is 10 years, which still fits a steady_clock deadline.
+    // A file keeps a bounded wait.
+    static std::chrono::seconds subscriberTimeout(bool liveSource);
+    // Why a publish that moqxr ended without an error ended too soon, or empty
+    // when it ended as moq2ts asked: stopRequested (running turned false), or
+    // sourceEnded (the source had no more Objects). Only a live source ends
+    // too soon: a file publish ends after its bounded wait, as before.
+    static QString unexpectedEndReason(bool liveSource, bool stopRequested, bool sourceEnded);
 
 signals:
     void connectionStateChanged(bool connected, const QString& message);
