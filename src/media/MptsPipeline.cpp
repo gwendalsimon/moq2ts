@@ -73,6 +73,10 @@ struct MptsPipeline::Shared {
     // Per program: an Object went out since the first pull.
     std::vector<bool> liveStarted;
     bool pulled = false;
+    // A program ended on an error or an interrupt, not at the end of its
+    // source; and the closing catalog has been handed out.
+    bool unclean = false;
+    bool broadcastEnded = false;
 
     enum class Pushed { Stopped, Dropped, Queued, QueuedFirstLive };
 
@@ -110,12 +114,17 @@ struct MptsPipeline::Shared {
         return pushed;
     }
 
-    // The next Object, or none once every program ended or on stop.
+    // The next Object, or none once every program ended or on stop. When
+    // every program ended at the end of its source, the last Object is the
+    // closing catalog (MSF -01 Section 11.3).
     std::optional<PublishedObject> pop() {
         std::unique_lock<std::mutex> lock(mutex);
         notEmpty.wait(lock, [&] { return stopping || !queue.empty() || liveWorkers == 0; });
-        if (stopping || queue.empty()) {
+        if (stopping) {
             return std::nullopt;
+        }
+        if (queue.empty()) {
+            return endBroadcast();
         }
         PublishedObject next = std::move(queue.front());
         queue.pop_front();
@@ -148,8 +157,31 @@ struct MptsPipeline::Shared {
         notFull.notify_all();
     }
 
-    void workerEnded() {
+    // The independent catalog that ends the broadcast for good: no track and
+    // isComplete. Sent once, and only when no program ended on an error or an
+    // interrupt, which commit to nothing about the content that follows.
+    // moqxr ends every other track before it sends this one.
+    std::optional<PublishedObject> endBroadcast() {
+        if (unclean || broadcastEnded || catalogs.isEmpty() || !catalogs.first().isLive) {
+            return std::nullopt;
+        }
+        broadcastEnded = true;
+        MsftsCatalog closing = catalogs.first();
+        closing.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
+        PublishedObject catalog;
+        catalog.trackName = QLatin1String(kCatalogTrackName);
+        catalog.payload = MsftsMuxer::completeCatalogJson(closing);
+        catalog.groupId = ++catalogGroupId;
+        catalog.objectId = 0;
+        catalog.startsGroup = true;
+        catalog.finalInGroup = true;
+        catalog.endsBroadcast = true;
+        return catalog;
+    }
+
+    void workerEnded(bool clean) {
         std::lock_guard<std::mutex> lock(mutex);
+        unclean = unclean || !clean;
         --liveWorkers;
         notEmpty.notify_all();
     }
@@ -497,10 +529,13 @@ void MptsPipeline::run() {
             end.trackName = program->track;
             end.endsTrack = true;
             shared->push(index, {end}, nullptr, std::nullopt, false);
-            if (!readError.isEmpty() && m_running.load(std::memory_order_acquire)) {
+            const bool running = m_running.load(std::memory_order_acquire);
+            if (!readError.isEmpty() && running) {
                 emit programEnded(program->config.programNumber, readError);
             }
-            shared->workerEnded();
+            // Only a clean end of the source: not an error, and not an
+            // interrupt, which closes the SRT pipe after it clears m_running.
+            shared->workerEnded(readError.isEmpty() && running);
         });
     }
     emit status(QStringLiteral("MSFTS multi-program pipeline started: %1 programs.").arg(programs.size()));
