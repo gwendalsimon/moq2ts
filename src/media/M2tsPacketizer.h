@@ -1,7 +1,7 @@
 #pragma once
 
 #include <QByteArray>
-#include <QFile>
+#include <QIODevice>
 #include <QList>
 #include <QSet>
 #include <QString>
@@ -40,6 +40,10 @@ struct M2tsObject {
     // It wraps; PcrClock turns a series of them into media time.
     std::int64_t pcr27 = -1;
 };
+
+// The size of the packets in a probe of the first bytes of a source: 188 for a
+// TS, 192 for an M2TS, or 0 when the sync bytes fit neither.
+int detectTsPacketSize(const QByteArray& probe);
 
 // MPEG-2 CRC_32 (ISO/IEC 13818-1 Annex A) of size octets.
 std::uint32_t mpegCrc32(const char* data, qsizetype size);
@@ -126,6 +130,11 @@ private:
 class M2tsPacketizer final {
 public:
     explicit M2tsPacketizer(QString sourcePath);
+    // Reads from any device; label names the source in log lines. open() opens
+    // the device ReadOnly unless it is already open, so a device that opens
+    // itself, like PacketQueueDevice, is used as it is. A sequential device
+    // takes the live path.
+    M2tsPacketizer(std::shared_ptr<QIODevice> device, QString label);
 
     // MSFTS carriage-profile knobs (msfts#7). Call before open(); defaults
     // preserve the historical filtered single-program behavior.
@@ -233,7 +242,7 @@ private:
     bool startsRandomAccess(int pid, const QByteArray& tsPacket);
 
     QString m_sourcePath;
-    QFile m_file;
+    std::shared_ptr<QIODevice> m_device;
     int m_packetSize = 0;
     int m_requestedProgramNumber = 0;
     int m_programNumber = 1;

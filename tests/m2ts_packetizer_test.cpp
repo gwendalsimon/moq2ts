@@ -856,6 +856,9 @@ int main() {
         run("gap-srt.fifo", false, gapOffset);
         const QStringList srtWarnings = warnings();
         warnings().clear();
+        run("gap-queue.fifo", false, gapOffset, SourceGapLog::ProgramQueue);
+        const QStringList queueWarnings = warnings();
+        warnings().clear();
         run("gap-caller.fifo", false, gapOffset, SourceGapLog::SrtNewCaller);
         const QStringList callerWarnings = warnings();
         qInstallMessageHandler(nullptr);
@@ -865,6 +868,9 @@ int main() {
                          callerWarnings.join(" | ").toStdString());
         ok &= expect(srtWarnings.filter("SRT receive buffer").size() == 1,
                      "gap warning: an SRT gap names the SRT receive buffer");
+        ok &= expect(queueWarnings.filter("queue").size() == 1 && queueWarnings.filter("SRT").isEmpty(),
+                     "gap warning: a queue overflow names the program's queue, not SRT: " +
+                         queueWarnings.join(" | ").toStdString());
 
         const GapRun none = run("gap-zero.fifo", true, 0);
         ok &= expect(none.error.isEmpty() && none.objects.size() == 3 &&

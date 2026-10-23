@@ -2,6 +2,8 @@
 
 #include "SourceGapLog.h"
 
+#include <QFile>
+
 #include <algorithm>
 #include <utility>
 #include <vector>
@@ -22,6 +24,9 @@ QByteArray gapReason(unsigned causes) {
     QList<QByteArray> reasons;
     if (causes & SourceGapLog::SrtReceiveBuffer) {
         reasons.append("the SRT receive buffer kept only the newest media while nothing read it");
+    }
+    if (causes & SourceGapLog::ProgramQueue) {
+        reasons.append("the program's queue overflowed: the track fell behind the source");
     }
     if (causes & SourceGapLog::SrtNewCaller) {
         reasons.append("a new SRT caller connected: its stream can jump in time and PCR");
@@ -410,8 +415,11 @@ std::uint64_t PtsUnwrapper::unwrap(std::int64_t pts) {
 }
 
 M2tsPacketizer::M2tsPacketizer(QString sourcePath)
-    : m_sourcePath(std::move(sourcePath)),
-      m_file(m_sourcePath) {}
+    : M2tsPacketizer(std::make_shared<QFile>(sourcePath), sourcePath) {}
+
+M2tsPacketizer::M2tsPacketizer(std::shared_ptr<QIODevice> device, QString label)
+    : m_sourcePath(std::move(label)),
+      m_device(std::move(device)) {}
 
 void M2tsPacketizer::setTransparent(bool transparent) {
     m_transparent = transparent;
@@ -439,15 +447,15 @@ void M2tsPacketizer::setSourceGaps(std::shared_ptr<SourceGapLog> gaps) {
 
 bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     m_requestedProgramNumber = requestedProgramNumber;
-    if (!m_file.open(QIODevice::ReadOnly)) {
+    if (!m_device->isOpen() && !m_device->open(QIODevice::ReadOnly)) {
         if (error) {
-            *error = QStringLiteral("Failed to open M2TS source: %1").arg(m_file.errorString());
+            *error = QStringLiteral("Failed to open M2TS source: %1").arg(m_device->errorString());
         }
         return false;
     }
     // FIFOs, pipes and /dev/stdin are non-seekable; readObject drains a prebuffer
     // instead of rewinding (see scanPsi).
-    m_sequential = m_file.isSequential();
+    m_sequential = m_device->isSequential();
     if (!detectPacketSize(error)) {
         return false;
     }
@@ -511,28 +519,35 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     m_opened = true;
     // Non-seekable sources cannot rewind; the prebuffer (or the peeked bytes) is
     // replayed forward-only by readObject.
-    return m_sequential ? true : m_file.seek(0);
+    return m_sequential ? true : m_device->seek(0);
+}
+
+int detectTsPacketSize(const QByteArray& probe) {
+    if (probe.size() < 188) {
+        return 0;
+    }
+    const auto syncAt = [&probe](int offset) {
+        return offset >= 0 && offset < probe.size() && static_cast<unsigned char>(probe[offset]) == 0x47;
+    };
+    if (syncAt(0) && (probe.size() < 188 * 2 || syncAt(188))) {
+        return 188;
+    }
+    if (syncAt(4) && (probe.size() < 192 * 2 || syncAt(196))) {
+        return 192;
+    }
+    return 0;
 }
 
 bool M2tsPacketizer::detectPacketSize(QString* error) {
-    const QByteArray probe = m_file.peek(192 * 4);
+    const QByteArray probe = m_device->peek(192 * 4);
     if (probe.size() < 188) {
         if (error) {
             *error = QStringLiteral("Input is too small to contain a TS packet.");
         }
         return false;
     }
-
-    const auto syncAt = [&probe](int offset) {
-        return offset >= 0 && offset < probe.size() && static_cast<unsigned char>(probe[offset]) == 0x47;
-    };
-
-    if (syncAt(0) && (probe.size() < 188 * 2 || syncAt(188))) {
-        m_packetSize = 188;
-        return true;
-    }
-    if (syncAt(4) && (probe.size() < 192 * 2 || syncAt(196))) {
-        m_packetSize = 192;
+    m_packetSize = detectTsPacketSize(probe);
+    if (m_packetSize != 0) {
         return true;
     }
 
@@ -564,14 +579,14 @@ bool M2tsPacketizer::scanPsi(QString* error) {
         }
         return false;
     };
-    const qint64 originalPos = m_file.pos();
-    if (!m_sequential && !m_file.seek(0)) {
+    const qint64 originalPos = m_device->pos();
+    if (!m_sequential && !m_device->seek(0)) {
         return fail(QStringLiteral("Failed to seek M2TS source while reading the PAT and PMT."));
     }
 
     constexpr int maxPacketsToScan = 4096;
     for (int index = 0; index < maxPacketsToScan && !psiComplete(); ++index) {
-        const QByteArray sourcePacket = m_file.read(m_packetSize);
+        const QByteArray sourcePacket = m_device->read(m_packetSize);
         if (sourcePacket.size() != m_packetSize) {
             break;
         }
@@ -588,7 +603,7 @@ bool M2tsPacketizer::scanPsi(QString* error) {
     // Non-seekable sources keep their forward-only position; readObject drains the
     // prebuffer captured above.
     if (!m_sequential) {
-        m_file.seek(originalPos);
+        m_device->seek(originalPos);
     }
 
     if (m_pmtPid < 0 && m_requestedProgramNumber != 0 && !m_patPrograms.empty()) {
@@ -1303,7 +1318,7 @@ QByteArray M2tsPacketizer::nextSourcePacket(std::uint64_t* offset) {
         packet = m_prebuffer.mid(m_prebufferPos, m_packetSize);
         m_prebufferPos += m_packetSize;
     } else {
-        packet = m_file.read(m_packetSize);
+        packet = m_device->read(m_packetSize);
     }
     *offset = m_sourceOffset;
     m_sourceOffset += static_cast<std::uint64_t>(packet.size());
@@ -1379,10 +1394,10 @@ QByteArray M2tsPacketizer::lookAheadPacket(qsizetype offset) {
     // readObject still publishes it. A seekable one is read in order from its
     // current position.
     if (!m_sequential) {
-        return m_file.read(m_packetSize);
+        return m_device->read(m_packetSize);
     }
     while (offset + m_packetSize > m_prebuffer.size()) {
-        const QByteArray packet = m_file.read(m_packetSize);
+        const QByteArray packet = m_device->read(m_packetSize);
         if (packet.size() != m_packetSize) {
             return {};
         }
@@ -1427,7 +1442,7 @@ void M2tsPacketizer::measureRates(bool muxRate) {
     if (muxRate && m_pcrPid < 0) {
         m_muxRateNote = QStringLiteral("the PMT gives no PCR PID");
     }
-    if (!m_sequential && !m_file.seek(0)) {
+    if (!m_sequential && !m_device->seek(0)) {
         return;
     }
     // Without a known PCR PID, as in a multiplex without a reference program,
@@ -1474,7 +1489,7 @@ void M2tsPacketizer::measureRates(bool muxRate) {
         lastIndex = index;
     }
     if (!m_sequential) {
-        m_file.seek(0);
+        m_device->seek(0);
     }
     const bool timed = elapsed > 0 && lastIndex > firstIndex;
     if (timed) {

@@ -312,6 +312,23 @@ else()
     message(STATUS "SRT ingest disabled (MOQ2TS_ENABLE_SRT=OFF, no libsrt, or unsupported platform); --srt-config will be rejected")
 endif()
 
+# Per-program (MPTS) publishing, as SRT ingest above: MptsFanOut.cpp includes
+# POSIX headers (poll.h, unistd.h) that MSVC lacks, so the MPTS files are
+# compiled only on UNIX. The option makes the excluded build reachable on a
+# UNIX host, to test it.
+option(MOQ2TS_ENABLE_MPTS "Build per-program (MPTS) publishing" ON)
+set(MOQ2TS_MPTS_BUILT FALSE)
+if(MOQ2TS_ENABLE_MPTS AND UNIX)
+    target_sources(moq2ts-core PRIVATE
+        src/media/PacketQueueDevice.cpp src/media/PacketQueueDevice.h
+        src/media/MptsFanOut.cpp src/media/MptsFanOut.h
+    )
+    set(MOQ2TS_MPTS_BUILT TRUE)
+    message(STATUS "Per-program (MPTS) publishing enabled")
+else()
+    message(STATUS "Per-program (MPTS) publishing disabled (MOQ2TS_ENABLE_MPTS=OFF or unsupported platform)")
+endif()
+
 if(MOQXR_PUBLISH_FOUND)
     target_include_directories(moq2ts-core PUBLIC ${MOQXR_PUBLISH_INCLUDE_DIR})
 endif()
@@ -498,4 +515,19 @@ if(UNIX AND NOT APPLE)
     target_include_directories(moq2ts-live-pipeline-end-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(moq2ts-live-pipeline-end-tests PRIVATE moq2ts-core ${CORE_QT_LIBS})
     add_test(NAME moq2ts-live-pipeline-end-tests COMMAND moq2ts-live-pipeline-end-tests)
+endif()
+
+# MPTS tests, only where the MPTS sources are compiled in.
+if(UNIX AND NOT APPLE AND MOQ2TS_MPTS_BUILT)
+    enable_testing()
+    add_executable(moq2ts-packet-queue-tests tests/packet_queue_device_test.cpp)
+    target_include_directories(moq2ts-packet-queue-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-packet-queue-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-packet-queue-tests COMMAND moq2ts-packet-queue-tests)
+
+    add_executable(moq2ts-mpts-fanout-tests tests/mpts_fanout_test.cpp)
+    target_include_directories(moq2ts-mpts-fanout-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-mpts-fanout-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-mpts-fanout-tests COMMAND moq2ts-mpts-fanout-tests)
+    set_tests_properties(moq2ts-mpts-fanout-tests PROPERTIES TIMEOUT 120)
 endif()
