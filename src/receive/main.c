@@ -282,6 +282,7 @@ int main(int argc, char **argv) {
                 /* A catalog that drops the track, such as the isComplete
                  * catalog that ends a live broadcast (MSF Section 11.3),
                  * ends it too. */
+                fputs("[rx] track ended\n", stderr);
                 ended = true;
             } else if ((ev.kind == MOQ_MEDIA_TRACK_LOCAL_FAILURE ||
                         ev.kind == MOQ_MEDIA_TRACK_DELIVERY_LOCAL_FAILURE) &&

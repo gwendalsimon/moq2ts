@@ -4,10 +4,12 @@
 # Each program is published as the per-program track program-<n> (MSFTS 5.3); the
 # script checks that each capture holds only its program's PIDs plus the PAT and PMT,
 # every PID of the program, and no continuity error. Exits non-zero otherwise.
-# Requires a running draft-22 relay, ffmpeg, ffprobe, and python3.
+# Requires a draft-22 relay (a local moq5-relay by default, see e2e-relay.sh),
+# ffmpeg, ffprobe, and python3.
 #
 # Environment:
-#   RELAY_URL         relay, e.g. moqt://127.0.0.1:4433 (required)
+#   RELAY_URL         an existing relay, e.g. moqt://127.0.0.1:4433; without it
+#                     a local relay starts from MOQ5_RELAY (see e2e-relay.sh)
 #   MOQ2TS_CLI        the moq2ts-cli binary (required)
 #   MOQ2TS_RECEIVER   the moq2ts-receiver binary (required)
 #   SRT_PORT          SRT listener port of moq2ts-cli (default 9124)
@@ -17,7 +19,6 @@
 #   NAMESPACE         MOQT namespace (default e2e/mpts/<time>)
 set -euo pipefail
 
-: "${RELAY_URL:?set RELAY_URL to the relay, e.g. moqt://127.0.0.1:4433}"
 : "${MOQ2TS_CLI:?set MOQ2TS_CLI to the moq2ts-cli binary}"
 : "${MOQ2TS_RECEIVER:?set MOQ2TS_RECEIVER to the moq2ts-receiver binary}"
 SRT_PORT="${SRT_PORT:-9124}"
@@ -43,6 +44,9 @@ cleanup() {
   if [ "$ok" -eq 1 ]; then rm -rf "$work"; else echo "artifacts kept in $work" >&2; fi
 }
 trap cleanup EXIT
+# shellcheck source=tests/e2e-relay.sh
+. "$(dirname "${BASH_SOURCE[0]}")/e2e-relay.sh"
+e2e_relay_start "$work" || exit 1
 # Print the tail of the publisher and sender logs, then fail.
 fail() {
   echo "FAIL: $*" >&2
