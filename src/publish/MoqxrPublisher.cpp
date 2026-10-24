@@ -256,7 +256,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         }
 
         openmoq::publisher::transport::TlsConfig tls;
-        tls.insecure_skip_verify = true;
+        tls.insecure_skip_verify = cfg.insecure;
         const auto status = activePublisher->publish_live_objects(source, parseEndpoint(cfg.moqEndpoint), tls, false);
         if (!status.ok && running.load(std::memory_order_acquire)) {
             emit publishError(QString::fromStdString(status.message));

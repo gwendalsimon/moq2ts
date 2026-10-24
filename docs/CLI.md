@@ -76,6 +76,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--fragment-ms <ms>` | `250` | Object media-duration hint and local mock pacing; RAPs determine media Group boundaries |
 | `--segment-bytes <n>` | `65536` | Target object size |
 | `--draft <n>` | `22` | MOQT transport draft version: 14, 16, 17, 18, 21, or 22. The relay must list it in `moqt_versions` |
+| `--insecure` | off | Do not verify the relay certificate. By default it is verified against `$SSL_CERT_FILE` or the system CA bundle, so a relay with a self-signed certificate needs this flag; use it for local or test relays only |
 | `--paced` | off | File sources only: pace publishing at media rate instead of as fast as possible |
 | `--width/--height/--fps/--video-bitrate` | 1920/1080/30/2500 | Capture params |
 | `--sample-rate/--channels/--audio-bitrate/--audio-codec` | 48000/2/160/aac | Audio params |
@@ -285,6 +286,7 @@ macOS only; a Windows build rejects it.
 | --- | --- | --- |
 | `relay.endpoint`, `relay.namespace` | required | As `--endpoint` and `--namespace` |
 | `relay.draft` | `22` | As `--draft` |
+| `relay.insecure` | `false` | As `--insecure`: `true` skips verifying the relay certificate |
 | `ingest.srt` | - | SRT ingest: `mode` (`listener` or `caller`, default `listener`), `host` (default `0.0.0.0` for a listener, `127.0.0.1` for a caller), `port` (default 9000), `latency_ms` (default 120), as in the `--srt-config` entry |
 | `ingest.path` | - | A FIFO or a pipe. A seekable file is refused: the tracks are live |
 | `programs[].number` | required | The program number in the PAT, from 1 to 65535, listed once |
@@ -393,6 +395,8 @@ tests/mpts-end-broadcast-e2e.sh
 ```
 
 `DRAFT=18` runs a script on draft 18 instead of 22; the local relay offers both.
+The publisher verifies the relay certificate, so against the local relay's
+throwaway certificate the scripts pass `--insecure`; with `RELAY_URL` they do not.
 Set `RELAY_URL` to use an existing relay instead, for example
 `RELAY_URL=moqt://127.0.0.1:4433`; the local relay is then not started. The
 receiver needs moq5 built with the `service` and `mpeg2ts` targets, and moq5 with

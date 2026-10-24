@@ -67,7 +67,7 @@ timeout 120 ffmpeg -hide_banner -loglevel error -y \
 mkfifo "$work/live.fifo"
 cat > "$work/mpts.json" <<JSON
 {
-  "relay": { "endpoint": "$RELAY_URL", "namespace": "$NAMESPACE", "draft": $DRAFT },
+  "relay": { "endpoint": "$RELAY_URL", "namespace": "$NAMESPACE", "draft": $DRAFT, "insecure": $E2E_INSECURE },
   "ingest": { "path": "$work/live.fifo" },
   "programs": [ { "number": ${PROGRAMS[0]} }, { "number": ${PROGRAMS[1]} } ]
 }

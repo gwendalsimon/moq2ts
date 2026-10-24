@@ -5,6 +5,10 @@
 # the script when the script's cleanup kills "${pids[@]}". With RELAY_URL set,
 # that relay is used as is.
 #
+# The publisher verifies the relay certificate, so against the local relay's
+# throwaway certificate it must skip the check. E2E_INSECURE is "true" then and
+# "false" for an existing relay; E2E_INSECURE_ARGS holds the CLI flag for it.
+#
 # Environment:
 #   RELAY_URL                  an existing relay, e.g. moqt://127.0.0.1:4433;
 #                              skips the local relay
@@ -13,6 +17,8 @@
 #                              build directory (optional)
 #   RELAY_PORT                 UDP port of the local relay (default: a free one)
 
+E2E_INSECURE=false
+E2E_INSECURE_ARGS=()
 e2e_relay_start() {
   local work="$1"
   if [ -n "${RELAY_URL:-}" ]; then
@@ -49,5 +55,7 @@ JSON
   done
   grep -q "listening on 127.0.0.1:$port" "$dir/relay.log" || { echo "the local relay did not start" >&2; return 1; }
   RELAY_URL="moqt://127.0.0.1:$port"
+  E2E_INSECURE=true
+  E2E_INSECURE_ARGS=(--insecure)
   echo "started a local relay on $RELAY_URL"
 }
