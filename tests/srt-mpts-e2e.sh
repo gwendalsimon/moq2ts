@@ -9,6 +9,7 @@ set -euo pipefail
 SRT_PORT="${SRT_PORT:-9123}"
 SECONDS_TO_RUN="${SECONDS_TO_RUN:-12}"
 NAMESPACE="${NAMESPACE:-e2e/mux/$(date +%s)}"
+DRAFT="${DRAFT:-22}"
 work="$(mktemp -d)"
 pids=()
 cleanup() {
@@ -38,10 +39,10 @@ ffmpeg -hide_banner -loglevel error -re -i "$work/source.ts" "${remux[@]}" \
 pids+=($!)
 sleep 1
 "$MOQ2TS_CLI" --endpoint "$RELAY_URL" --namespace "$NAMESPACE" --srt-config "$work/srt.json" \
-  --publish-multiplex --draft 22 "$@" > "$work/publisher.log" 2>&1 &
+  --publish-multiplex --draft "$DRAFT" "$@" > "$work/publisher.log" 2>&1 &
 pids+=($!)
 sleep 2
-"$MOQ2TS_RECEIVER" --url "$RELAY_URL" --namespace "$NAMESPACE" --draft 22 \
+"$MOQ2TS_RECEIVER" --url "$RELAY_URL" --namespace "$NAMESPACE" --draft "$DRAFT" \
   --duration "$SECONDS_TO_RUN" --insecure --out "$work/capture.ts" \
   --stats-json "$work/stats.json" > "$work/receiver.out" 2> "$work/receiver.log"
 

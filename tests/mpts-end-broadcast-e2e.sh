@@ -15,6 +15,7 @@
 #   MOQ2TS_RECEIVER   the moq2ts-receiver binary (required)
 #   SOURCE_SECONDS    length of the source in seconds (default 15)
 #   RX_DURATION       upper bound of each receiver, in seconds (default 90)
+#   DRAFT             MOQT draft of the publisher and receiver, 22 or 18 (default 22)
 #   NAMESPACE         MOQT namespace (default e2e/mpts-end/<time>)
 set -euo pipefail
 
@@ -23,6 +24,7 @@ set -euo pipefail
 SOURCE_SECONDS="${SOURCE_SECONDS:-15}"
 RX_DURATION="${RX_DURATION:-90}"
 NAMESPACE="${NAMESPACE:-e2e/mpts-end/$(date +%s)}"
+DRAFT="${DRAFT:-22}"
 PROGRAMS=(101 102)
 MUX_RATE=3000000
 # The receivers start about 4 s after the source and must end within this many
@@ -65,7 +67,7 @@ timeout 120 ffmpeg -hide_banner -loglevel error -y \
 mkfifo "$work/live.fifo"
 cat > "$work/mpts.json" <<JSON
 {
-  "relay": { "endpoint": "$RELAY_URL", "namespace": "$NAMESPACE", "draft": 22 },
+  "relay": { "endpoint": "$RELAY_URL", "namespace": "$NAMESPACE", "draft": $DRAFT },
   "ingest": { "path": "$work/live.fifo" },
   "programs": [ { "number": ${PROGRAMS[0]} }, { "number": ${PROGRAMS[1]} } ]
 }
@@ -88,7 +90,7 @@ kill -0 "$sender" 2>/dev/null || fail "the sender exited before the receivers st
 started=$SECONDS
 rx=()
 for n in "${PROGRAMS[@]}"; do
-  timeout "$((RX_DURATION + 30))" "$MOQ2TS_RECEIVER" --url "$RELAY_URL" --namespace "$NAMESPACE" --draft 22 \
+  timeout "$((RX_DURATION + 30))" "$MOQ2TS_RECEIVER" --url "$RELAY_URL" --namespace "$NAMESPACE" --draft "$DRAFT" \
     --track "program-$n" --duration "$RX_DURATION" --insecure --out "$work/program-$n.ts" \
     --stats-json "$work/program-$n.json" > "$work/receiver-$n.out" 2> "$work/receiver-$n.log" &
   rx+=($!)

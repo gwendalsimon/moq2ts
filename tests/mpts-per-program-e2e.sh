@@ -16,6 +16,7 @@
 #   SRT_PAYLOAD       SRT payload size in bytes, a multiple of 188 (default 1316);
 #                     lower it, e.g. to 940, where large loopback datagrams are lost
 #   SECONDS_TO_RUN    receive duration in seconds (default 25)
+#   DRAFT             MOQT draft of the publisher and receiver, 22 or 18 (default 22)
 #   NAMESPACE         MOQT namespace (default e2e/mpts/<time>)
 set -euo pipefail
 
@@ -25,6 +26,7 @@ SRT_PORT="${SRT_PORT:-9124}"
 SRT_PAYLOAD="${SRT_PAYLOAD:-1316}"
 SECONDS_TO_RUN="${SECONDS_TO_RUN:-25}"
 NAMESPACE="${NAMESPACE:-e2e/mpts/$(date +%s)}"
+DRAFT="${DRAFT:-22}"
 PROGRAMS=(101 102)
 MUX_RATE=3000000
 for tool in ffmpeg ffprobe python3 timeout; do
@@ -68,7 +70,7 @@ timeout 120 ffmpeg -hide_banner -loglevel error -y \
 
 cat > "$work/mpts.json" <<JSON
 {
-  "relay": { "endpoint": "$RELAY_URL", "namespace": "$NAMESPACE", "draft": 22 },
+  "relay": { "endpoint": "$RELAY_URL", "namespace": "$NAMESPACE", "draft": $DRAFT },
   "ingest": { "srt": { "mode": "listener", "host": "127.0.0.1", "port": $SRT_PORT, "latency_ms": 200 } },
   "programs": [ { "number": ${PROGRAMS[0]} }, { "number": ${PROGRAMS[1]} } ]
 }
@@ -91,7 +93,7 @@ kill -0 "$sender" 2>/dev/null || fail "the sender exited before the receivers st
 
 rx=()
 for n in "${PROGRAMS[@]}"; do
-  timeout "$((SECONDS_TO_RUN + 30))" "$MOQ2TS_RECEIVER" --url "$RELAY_URL" --namespace "$NAMESPACE" --draft 22 --track "program-$n" \
+  timeout "$((SECONDS_TO_RUN + 30))" "$MOQ2TS_RECEIVER" --url "$RELAY_URL" --namespace "$NAMESPACE" --draft "$DRAFT" --track "program-$n" \
     --duration "$SECONDS_TO_RUN" --insecure --out "$work/program-$n.ts" \
     --stats-json "$work/program-$n.json" > "$work/receiver-$n.out" 2> "$work/receiver-$n.log" &
   rx+=($!)
