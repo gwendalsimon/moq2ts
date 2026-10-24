@@ -39,7 +39,7 @@ ffmpeg -hide_banner -loglevel error -re -i "$work/source.ts" "${remux[@]}" \
 pids+=($!)
 sleep 1
 "$MOQ2TS_CLI" --endpoint "$RELAY_URL" --namespace "$NAMESPACE" --srt-config "$work/srt.json" \
-  --publish-multiplex --draft "$DRAFT" "$@" > "$work/publisher.log" 2>&1 &
+  --publish-multiplex --draft "$DRAFT" ${E2E_INSECURE_ARGS[@]+"${E2E_INSECURE_ARGS[@]}"} "$@" > "$work/publisher.log" 2>&1 &
 pids+=($!)
 sleep 2
 "$MOQ2TS_RECEIVER" --url "$RELAY_URL" --namespace "$NAMESPACE" --draft "$DRAFT" \

@@ -52,6 +52,7 @@ struct PublishConfig {
     int mpeg2tsMuxRateBps = 0;      // advisory source mux rate; 0 omits the catalog hint
     bool pacedFileSource = false;    // pace file-source publishing at media-time rate
     int draftVersion = 22;              // MOQT transport draft version
+    bool insecure = false;              // skip verifying the relay certificate (--insecure)
     // Set by the pipeline to the PID whose random access points start Groups;
     // the SRT ring buffer resyncs on it after a drop. Null outside SRT ingest.
     std::shared_ptr<std::atomic<int>> resyncPid;

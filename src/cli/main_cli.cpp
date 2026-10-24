@@ -335,6 +335,10 @@ int main(int argc, char** argv) {
         QStringLiteral("Pace file-source publishing at media-time rate (prevents dumping all data at wire speed).")));
     addValue(QStringLiteral("draft"), QStringLiteral("MOQT transport draft version: 14, 16, 17, 18, 21 or 22. The relay must list it."),
              QStringLiteral("version"), QStringLiteral("22"));
+    parser.addOption(QCommandLineOption(QStringLiteral("insecure"),
+        QStringLiteral("Do not verify the relay certificate. For a local or test relay with a self-signed "
+                       "certificate; by default the certificate is verified against $SSL_CERT_FILE or the system "
+                       "CA bundle.")));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-si"),
         QStringLiteral("Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT), with the SDT and EIT reduced to the carried service.")));
     addValue(QStringLiteral("si"),
@@ -399,6 +403,7 @@ int main(int argc, char** argv) {
     cfg.transparentMode = parser.isSet(QStringLiteral("unmodified"));
     cfg.pacedFileSource = parser.isSet(QStringLiteral("paced"));
     cfg.draftVersion = parser.value(QStringLiteral("draft")).toInt();
+    cfg.insecure = parser.isSet(QStringLiteral("insecure"));
     if (!moq2ts::MoqxrPublisher::supportsDraft(cfg.draftVersion)) {
         logLine(stderr, "error", QStringLiteral("--draft %1 is not supported; use %2.")
                                      .arg(parser.value(QStringLiteral("draft")),

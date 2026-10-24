@@ -22,7 +22,7 @@ struct SrtIngestSpec {
 // One multi-program publisher: the relay session, one live source, and the
 // programs published as per-program tracks (draft "Per-Program").
 struct PublisherSpec {
-    // The relay settings: moqEndpoint, namespaceName, and draftVersion.
+    // The relay settings: moqEndpoint, namespaceName, draftVersion, and insecure.
     PublishConfig relay;
     // Exactly one ingest is set: srt (srt.mode not empty) or sourcePath (a FIFO).
     SrtIngestSpec srt;
@@ -33,7 +33,8 @@ struct PublisherSpec {
 
 // Reads a publisher configuration:
 //   {
-//     "relay": { "endpoint": "moqt://relay.example:4433", "namespace": "live/mpts", "draft": 22 },
+//     "relay": { "endpoint": "moqt://relay.example:4433", "namespace": "live/mpts", "draft": 22,
+//                "insecure": false },
 //     "ingest": { "srt": { "mode": "listener", "host": "0.0.0.0", "port": 9000, "latency_ms": 200 } },
 //     "programs": [ { "number": 101, "mux_rate_bps": 6000000, "si": ["sdt", "eit-pf", "tdt-tot"] },
 //                   { "number": 102 } ],

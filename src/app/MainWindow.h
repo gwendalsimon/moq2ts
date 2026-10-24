@@ -70,6 +70,7 @@ private:
     PreviewPanel* previewPanel = nullptr;
 
     QLineEdit* endpointEdit = nullptr;
+    QCheckBox* insecureCheck = nullptr;
     QLineEdit* namespaceEdit = nullptr;
     QLineEdit* videoSourceEdit = nullptr;
     QLineEdit* audioSourceEdit = nullptr;

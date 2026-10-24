@@ -64,6 +64,8 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     auto* form = new QFormLayout();
 
     endpointEdit = new QLineEdit("mock://local");
+    insecureCheck = new QCheckBox("Do not verify the relay certificate (self-signed test relays only)");
+    insecureCheck->setChecked(false);
     namespaceEdit = new QLineEdit("live/paul1");
 
     videoSourceEdit = new QLineEdit();
@@ -142,6 +144,7 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     useOpusFallbackCheck->setChecked(false);
 
     form->addRow("MOQ endpoint", endpointEdit);
+    form->addRow(QString(), insecureCheck);
     form->addRow("MOQ namespace (tuple, /-separated)", namespaceEdit);
     form->addRow("M2TS source", videoRow);
     form->addRow("Alternate M2TS source", audioRow);
@@ -248,6 +251,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 
 void MainWindow::setUiEnabled(bool enabled) {
     endpointEdit->setEnabled(enabled);
+    insecureCheck->setEnabled(enabled);
     namespaceEdit->setEnabled(enabled);
     videoSourceEdit->setEnabled(enabled);
     audioSourceEdit->setEnabled(enabled);
@@ -347,6 +351,7 @@ void MainWindow::refreshCaptureDevices() {
 PublishConfig MainWindow::currentConfig() const {
     PublishConfig cfg;
     cfg.moqEndpoint = endpointEdit->text().trimmed();
+    cfg.insecure = insecureCheck->isChecked();
     cfg.namespaceName = namespaceEdit->text().trimmed();
     cfg.videoSource = videoSourceEdit->text().trimmed();
     cfg.audioSource = audioSourceEdit->text().trimmed();
@@ -377,6 +382,7 @@ PublishConfig MainWindow::currentConfig() const {
 void MainWindow::loadPreferences() {
     QSettings settings;
     endpointEdit->setText(settings.value(QStringLiteral("publish/endpoint"), endpointEdit->text()).toString());
+    insecureCheck->setChecked(settings.value(QStringLiteral("publish/insecure"), insecureCheck->isChecked()).toBool());
     namespaceEdit->setText(settings.value(QStringLiteral("publish/namespace"), namespaceEdit->text()).toString());
 
     widthSpin->setValue(settings.value(QStringLiteral("video/width"), widthSpin->value()).toInt());
@@ -401,6 +407,7 @@ void MainWindow::loadPreferences() {
 void MainWindow::savePreferences() const {
     QSettings settings;
     settings.setValue(QStringLiteral("publish/endpoint"), endpointEdit->text().trimmed());
+    settings.setValue(QStringLiteral("publish/insecure"), insecureCheck->isChecked());
     settings.setValue(QStringLiteral("publish/namespace"), namespaceEdit->text().trimmed());
 
     settings.setValue(QStringLiteral("video/width"), widthSpin->value());

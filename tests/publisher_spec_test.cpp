@@ -64,6 +64,7 @@ int main() {
         ok &= expect(spec.relay.moqEndpoint == QStringLiteral("moqt://relay.example:4433"), "endpoint");
         ok &= expect(spec.relay.namespaceName == QStringLiteral("live/mpts"), "namespace");
         ok &= expect(spec.relay.draftVersion == 22, "draft");
+        ok &= expect(!spec.relay.insecure, "the relay certificate is verified by default");
         ok &= expect(spec.srt.mode == QStringLiteral("listener"), "srt mode");
         ok &= expect(spec.srt.host == QStringLiteral("0.0.0.0"), "srt host");
         ok &= expect(spec.srt.port == 9000, "srt port");
@@ -177,6 +178,15 @@ int main() {
                   {QStringLiteral("programs[1].number"), QStringLiteral("1.5")}, "non-integer program number");
     ok &= rejects(exampleWith(R"({ "number": 102 })", R"({ "number": 101 })"),
                   {QStringLiteral("programs[1].number"), QStringLiteral("101")}, "duplicate program number");
+    {
+        PublisherSpec spec;
+        QString error;
+        const bool parsed = parsePublisherSpec(exampleWith(R"("draft": 22)", R"("draft": 22, "insecure": true)"), &spec, &error);
+        ok &= expect(parsed, "relay.insecure parses: " + error.toStdString());
+        ok &= expect(parsed && spec.relay.insecure, "relay.insecure true is kept");
+    }
+    ok &= rejects(exampleWith(R"("draft": 22)", R"("draft": 22, "insecure": "yes")"),
+                  {QStringLiteral("relay.insecure"), QStringLiteral("\"yes\"")}, "insecure not a boolean");
     ok &= rejects(exampleWith(R"("draft": 22)", R"("draft": 99)"),
                   {QStringLiteral("relay.draft"), QStringLiteral("99")}, "unsupported draft");
     ok &= rejects(exampleWith(R"(["sdt", "eit-pf", "tdt-tot"])", R"("sdt")"),

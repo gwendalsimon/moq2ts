@@ -70,7 +70,7 @@ timeout 120 ffmpeg -hide_banner -loglevel error -y \
 
 cat > "$work/mpts.json" <<JSON
 {
-  "relay": { "endpoint": "$RELAY_URL", "namespace": "$NAMESPACE", "draft": $DRAFT },
+  "relay": { "endpoint": "$RELAY_URL", "namespace": "$NAMESPACE", "draft": $DRAFT, "insecure": $E2E_INSECURE },
   "ingest": { "srt": { "mode": "listener", "host": "127.0.0.1", "port": $SRT_PORT, "latency_ms": 200 } },
   "programs": [ { "number": ${PROGRAMS[0]} }, { "number": ${PROGRAMS[1]} } ]
 }

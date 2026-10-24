@@ -94,7 +94,9 @@ bool readRelay(const QJsonObject& root, PublishConfig* relay, QString* error) {
     QJsonObject object;
     if (!readObject(root, QStringLiteral("relay"), QStringLiteral("relay"), &object, error) ||
         !checkKeys(object, QStringLiteral("relay"),
-                   {QStringLiteral("endpoint"), QStringLiteral("namespace"), QStringLiteral("draft")}, error) ||
+                   {QStringLiteral("endpoint"), QStringLiteral("namespace"), QStringLiteral("draft"),
+                    QStringLiteral("insecure")},
+                   error) ||
         !readString(object, QStringLiteral("endpoint"), QStringLiteral("relay.endpoint"), true, &relay->moqEndpoint,
                     error) ||
         !readString(object, QStringLiteral("namespace"), QStringLiteral("relay.namespace"), true,
@@ -112,6 +114,13 @@ bool readRelay(const QJsonObject& root, PublishConfig* relay, QString* error) {
                                .arg(MoqxrPublisher::supportedDrafts()));
     }
     relay->draftVersion = static_cast<int>(draft);
+    const QJsonValue insecure = object.value(QStringLiteral("insecure"));
+    if (!insecure.isUndefined()) {
+        if (!insecure.isBool()) {
+            return fail(error, QStringLiteral("relay.insecure: %1 is not true or false.").arg(jsonText(insecure)));
+        }
+        relay->insecure = insecure.toBool();
+    }
     return true;
 }
 
