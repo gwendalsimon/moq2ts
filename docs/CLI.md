@@ -353,7 +353,8 @@ errors. `moqt_gaps` counts reported delivery gaps; `drops`, `parse_drops`, and
 TS packets but reported five MoQT gaps. `--stats-json` writes the final counters
 when the receiver exits.
 
-The receiver negotiates draft 22 exactly, reads the MSF catalog, and selects
+The receiver negotiates one draft exactly, 22 by default or 18 with `--draft 18`
+(draft 16 and earlier are not supported). It reads the MSF catalog, and selects
 the only compatible MPEG-TS track or the only unmodified multiplex when several
 program tracks exist. Use `--track NAME` to select a particular track. It writes
 188-byte TS or 192-byte M2TS source packets unchanged; `--out -` writes binary
@@ -391,6 +392,7 @@ MOQ2TS_RECEIVER=./build-receiver/moq2ts-receiver \
 tests/mpts-end-broadcast-e2e.sh
 ```
 
+`DRAFT=18` runs a script on draft 18 instead of 22; the local relay offers both.
 Set `RELAY_URL` to use an existing relay instead, for example
 `RELAY_URL=moqt://127.0.0.1:4433`; the local relay is then not started. The
 receiver needs moq5 built with the `service` and `mpeg2ts` targets, and moq5 with

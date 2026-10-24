@@ -26,6 +26,7 @@ typedef struct options {
     const char *out_path;
     const char *stats_path;
     unsigned duration;
+    unsigned draft;   /* 22 (the default) or 18 */
     bool insecure;
     bool fail_on_gap;
 } options_t;
@@ -38,7 +39,7 @@ typedef struct candidate {
 
 static void usage(FILE *out) {
     fputs("moq2ts-receiver --url moqt://host:port --namespace live/name --out capture.ts\n"
-          "  [--track NAME] [--stats-json FILE] [--duration SECONDS] [--draft 22]\n"
+          "  [--track NAME] [--stats-json FILE] [--duration SECONDS] [--draft 22|18]\n"
           "  [--insecure] [--fail-on-gap]\n"
           "  https:// URLs use WebTransport when moq5 was built with that backend.\n"
           "  Stats go to stderr; --out - sends source packets to stdout.\n", out);
@@ -46,6 +47,7 @@ static void usage(FILE *out) {
 
 static bool parse_options(int argc, char **argv, options_t *o) {
     memset(o, 0, sizeof(*o));
+    o->draft = 22;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(stdout);
@@ -65,7 +67,10 @@ static bool parse_options(int argc, char **argv, options_t *o) {
         } else if (i + 1 < argc && !strcmp(argv[i], "--stats-json")) {
             o->stats_path = argv[++i];
         } else if (i + 1 < argc && !strcmp(argv[i], "--draft")) {
-            if (strcmp(argv[++i], "22")) return false;
+            const char *draft = argv[++i];
+            if (!strcmp(draft, "22")) o->draft = 22;
+            else if (!strcmp(draft, "18")) o->draft = 18;
+            else return false;
         } else if (i + 1 < argc && !strcmp(argv[i], "--duration")) {
             char *end = NULL;
             unsigned long n = strtoul(argv[++i], &end, 10);
@@ -191,10 +196,10 @@ int main(int argc, char **argv) {
     ec.url.len = strlen(opt.url);
     ec.backend = MOQ_TRANSPORT_BACKEND_AUTO;
     ec.insecure_skip_verify = opt.insecure;
-    static const moq_version_t draft22 = MOQ_VERSION_DRAFT_22;
+    const moq_version_t draft = opt.draft == 18 ? MOQ_VERSION_DRAFT_18 : MOQ_VERSION_DRAFT_22;
     ec.versions.struct_size = sizeof(ec.versions);
     ec.versions.policy = MOQ_VERSION_POLICY_EXACT;
-    ec.versions.versions = &draft22;
+    ec.versions.versions = &draft;
     ec.versions.version_count = 1;
     moq_endpoint_t *ep = NULL;
     moq_result_t rc = moq_endpoint_connect(&ec, &ep);

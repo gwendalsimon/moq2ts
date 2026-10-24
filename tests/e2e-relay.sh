@@ -1,6 +1,6 @@
 # Sourced by the end-to-end scripts. e2e_relay_start <work-dir> sets RELAY_URL.
 #
-# Without RELAY_URL it starts a local moq5-relay (draft 22) on loopback with a
+# Without RELAY_URL it starts a local moq5-relay (drafts 22 and 18) on loopback with a
 # throwaway certificate, so a run publishes to no public service. It stops with
 # the script when the script's cleanup kills "${pids[@]}". With RELAY_URL set,
 # that relay is used as is.
@@ -32,7 +32,7 @@ e2e_relay_start() {
     -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2> /dev/null
   cat > "$dir/relay.json" <<JSON
 {
-  "listener": { "host": "127.0.0.1", "port": $port, "versions": [22], "lanes": 1,
+  "listener": { "host": "127.0.0.1", "port": $port, "versions": [22, 18], "lanes": 1,
                 "cert": "$dir/cert.pem", "key": "$dir/key.pem" },
   "auth": { "mode": "allow_all" }
 }
